@@ -42,6 +42,11 @@
 #      is usually FALSE because skipped species are commonly data-limited
 #      species without enough information to build a climate model.
 #
+#   `verify_completed_outputs`
+#      If TRUE, a registry row marked completed is skipped only when the expected
+#      project folder and terminal model file(s) still exist. This protects reruns
+#      after project folders were moved, deleted, or partially restored.
+#
 #   `run_setup_01`
 #      If TRUE, stage 01 is run once per `project_prefix` under a shared setup
 #      lock. Other chunks skip it after the setup marker exists.
@@ -68,8 +73,8 @@
 #      normal background jobs because writes to these files are brief.
 #
 #   `species_lock_timeout`
-#      How long to wait for a per-species lock. The default of 0 means a job
-#      skips a species immediately if another process already holds its lock.
+#      How long to wait for a per-species lock. The default of 5 seconds avoids
+#      rare false skips during simultaneous chunk-worker claim attempts.
 #
 # Control files and verbose logs are written outside species projects under:
 #   data/projects/<project_prefix>_chunk_control/
@@ -92,6 +97,7 @@ filter_value <- "Yes"
 
 retry_failed <- TRUE
 retry_skipped <- FALSE
+verify_completed_outputs <- TRUE
 
 run_setup_01 <- TRUE
 force_setup_01 <- FALSE
@@ -106,7 +112,7 @@ config_guard <- "stop" # one of "stop", "warn", or "ignore"
 max_project_name_chars <- 90L
 registry_lock_timeout <- Inf
 event_lock_timeout <- Inf
-species_lock_timeout <- 0
+species_lock_timeout <- 5
 
 
 #-------------------------------------------------------------------------------
@@ -723,6 +729,41 @@ taxa_summary_values <- function(taxa_info) {
   )
 }
 
+completed_outputs_ready <- function(registry_row) {
+  if (!isTRUE(verify_completed_outputs)) {
+    return(TRUE)
+  }
+
+  project_value <- registry_row$project[[1]]
+  if (length(project_value) == 0 || is.na(project_value) || !nzchar(project_value)) {
+    return(FALSE)
+  }
+
+  project_dir <- file.path("data", "projects", project_value)
+  if (!dir.exists(project_dir)) {
+    return(FALSE)
+  }
+
+  taxa_info <- tryCatch(read_taxa_metadata(project_value), error = function(e) NULL)
+  if (is.null(taxa_info)) {
+    return(FALSE)
+  }
+
+  climate_exists <- any(file.exists(taxa_info$climate_qs))
+  habitat_exists <- any(file.exists(taxa_info$habitat_qs))
+  outcome_value <- registry_row$outcome[[1]]
+  outcome_value <- ifelse(is.na(outcome_value), "", outcome_value)
+
+  if (identical(outcome_value, "full_model")) {
+    return(climate_exists && habitat_exists)
+  }
+  if (identical(outcome_value, "climate_only")) {
+    return(climate_exists)
+  }
+
+  climate_exists || habitat_exists
+}
+
 
 #-------------------------------------------------------------------------------
 # Stage execution
@@ -823,7 +864,9 @@ claim_species <- function(species_row) {
     current <- registry[registry$species_key == species_row$species_key, , drop = FALSE]
     current <- if (nrow(current) > 0) current[nrow(current), , drop = FALSE] else NULL
 
-    if (!is.null(current) && identical(current$status[[1]], "completed")) {
+    if (!is.null(current) &&
+        identical(current$status[[1]], "completed") &&
+        completed_outputs_ready(current)) {
       list(claimed = FALSE, reason = "Species is already completed.", attempt = current$attempt[[1]])
     } else if (!is.null(current) && identical(current$status[[1]], "skipped") && !isTRUE(retry_skipped)) {
       list(claimed = FALSE, reason = "Species was previously skipped and retry_skipped is FALSE.", attempt = current$attempt[[1]])
@@ -862,6 +905,8 @@ claim_species <- function(species_row) {
       reason <- ""
       if (!is.null(current) && identical(current$status[[1]], "running")) {
         reason <- "Previous registry state was running, but no active species lock was held; starting a new attempt."
+      } else if (!is.null(current) && identical(current$status[[1]], "completed")) {
+        reason <- "Previous registry state was completed, but expected output file(s) are missing; starting a new attempt."
       }
 
       list(claimed = TRUE, reason = reason, attempt = attempt)
@@ -974,6 +1019,83 @@ mark_species_completed <- function(species_row, attempt, outcome, taxa_info) {
 #-------------------------------------------------------------------------------
 # Setup and species processing
 #-------------------------------------------------------------------------------
+config_value <- function(config_env, name, default = NULL) {
+  if (exists(name, envir = config_env, inherits = FALSE)) {
+    get(name, envir = config_env, inherits = FALSE)
+  } else {
+    default
+  }
+}
+
+expected_setup_output_paths <- function(config_path = file.path("src", "00_configurations.R")) {
+  config_env <- new.env(parent = baseenv())
+  sys.source(config_path, envir = config_env)
+
+  use_user_specific_climate <- !is.null(config_value(config_env, "user_specific_climate_data", NULL))
+  use_user_specific_landcover <- !is.null(config_value(config_env, "user_specific_landcover_data", NULL))
+  country_of_interest_value <- config_value(config_env, "country_of_interest", "Europe")
+  custom_country_boundary_path_value <- config_value(config_env, "custom_country_boundary_path", NULL)
+
+  paths <- character()
+
+  if (!isTRUE(use_user_specific_climate)) {
+    processed_folder <- file.path("data", "external", "climate", "chelsa_current", "processed")
+    paths <- c(
+      paths,
+      file.path(processed_folder, "globalclimpreds.tif"),
+      file.path(processed_folder, "globalclim_5k.tif"),
+      file.path(processed_folder, "euclimpreds.tif")
+    )
+
+    if (tolower(as.character(country_of_interest_value)) != "europe" ||
+        !is.null(custom_country_boundary_path_value)) {
+      paths <- c(paths, file.path(processed_folder, "country_climpreds.tif"))
+    }
+
+    for (period in c("2041-2070", "2071-2100")) {
+      for (scenario in c("ssp126", "ssp370", "ssp585")) {
+        paths <- c(
+          paths,
+          file.path(
+            "data", "external", "climate", "chelsa_future", "country",
+            period, scenario, paste0(period, "_", scenario, "_masked.tif")
+          )
+        )
+      }
+    }
+  }
+
+  if (!isTRUE(use_user_specific_landcover)) {
+    paths <- c(paths, file.path("data", "external", "habitat", "processed", "habitat_stack.tif"))
+  }
+
+  unique(paths)
+}
+
+missing_setup_output_paths <- function(paths) {
+  if (length(paths) == 0) {
+    return(character())
+  }
+
+  info <- file.info(paths)
+  paths[!file.exists(paths) | is.na(info$size) | info$size <= 0]
+}
+
+format_setup_output_summary <- function(paths, max_paths = 8L) {
+  if (length(paths) == 0) {
+    return("none")
+  }
+
+  shown <- head(paths, max_paths)
+  suffix <- if (length(paths) > max_paths) {
+    paste0(" ... and ", length(paths) - max_paths, " more")
+  } else {
+    ""
+  }
+
+  paste0(paste(shown, collapse = "; "), suffix)
+}
+
 run_setup_once <- function() {
   if (!isTRUE(run_setup_01)) {
     runner_message("SKIP", NA_character_, project_prefix_safe, "01", NA_integer_, NA_integer_, "run_setup_01 is FALSE.")
@@ -981,13 +1103,31 @@ run_setup_once <- function() {
   }
 
   setup_marker <- file.path(control_dir, "setup_01_completed.txt")
-  if (file.exists(setup_marker) && !isTRUE(force_setup_01)) {
+  setup_outputs <- expected_setup_output_paths()
+  missing_setup_outputs <- missing_setup_output_paths(setup_outputs)
+
+  if (file.exists(setup_marker) && !isTRUE(force_setup_01) && length(missing_setup_outputs) == 0) {
     runner_message("SKIP", NA_character_, project_prefix_safe, "01", NA_integer_, NA_integer_, "Setup marker already exists.")
     return(invisible(FALSE))
+  } else if (file.exists(setup_marker) && !isTRUE(force_setup_01)) {
+    runner_message(
+      "START",
+      NA_character_,
+      project_prefix_safe,
+      "01",
+      NA_integer_,
+      NA_integer_,
+      paste0(
+        "Setup marker exists, but required setup output(s) are missing. Rerunning setup. Missing: ",
+        format_setup_output_summary(missing_setup_outputs)
+      )
+    )
   }
 
   with_locked_file(setup_lock_path, {
-    if (file.exists(setup_marker) && !isTRUE(force_setup_01)) {
+    missing_setup_outputs <- missing_setup_output_paths(setup_outputs)
+
+    if (file.exists(setup_marker) && !isTRUE(force_setup_01) && length(missing_setup_outputs) == 0) {
       runner_message(
         "SKIP",
         NA_character_,
@@ -1013,6 +1153,16 @@ run_setup_once <- function() {
       if (!isTRUE(result$ok)) {
         runner_message("ERROR", NA_character_, project_prefix_safe, "01", NA_integer_, NA_integer_, result$error_message)
         stop("Stage 01 setup failed. See log: ", result$log_file, call. = FALSE)
+      }
+
+      missing_after_setup <- missing_setup_output_paths(setup_outputs)
+      if (length(missing_after_setup) > 0) {
+        message_text <- paste0(
+          "Stage 01 setup finished, but required setup output(s) are still missing: ",
+          format_setup_output_summary(missing_after_setup)
+        )
+        runner_message("ERROR", NA_character_, project_prefix_safe, "01", NA_integer_, NA_integer_, message_text)
+        stop(message_text, call. = FALSE)
       }
 
       writeLines(
@@ -1205,8 +1355,12 @@ dry_run_report <- function(active_species_table) {
     previous <- if (nrow(previous) > 0) previous[nrow(previous), , drop = FALSE] else NULL
 
     decision <- "would run"
-    if (!is.null(previous) && identical(previous$status[[1]], "completed")) {
+    if (!is.null(previous) &&
+        identical(previous$status[[1]], "completed") &&
+        completed_outputs_ready(previous)) {
       decision <- "would skip: completed"
+    } else if (!is.null(previous) && identical(previous$status[[1]], "completed")) {
+      decision <- "would rerun: completed registry row has missing output files"
     } else if (!is.null(previous) && identical(previous$status[[1]], "skipped") && !retry_skipped) {
       decision <- "would skip: previously skipped"
     } else if (!is.null(previous) && identical(previous$status[[1]], "failed") && retry_failed) {
@@ -1246,6 +1400,11 @@ run_runner_settings_preflight <- function() {
   }
   if (!is.logical(retry_skipped) || length(retry_skipped) != 1 || is.na(retry_skipped)) {
     stop("retry_skipped must be TRUE or FALSE.", call. = FALSE)
+  }
+  if (!is.logical(verify_completed_outputs) ||
+      length(verify_completed_outputs) != 1 ||
+      is.na(verify_completed_outputs)) {
+    stop("verify_completed_outputs must be TRUE or FALSE.", call. = FALSE)
   }
   if (!is.logical(run_setup_01) || length(run_setup_01) != 1 || is.na(run_setup_01)) {
     stop("run_setup_01 must be TRUE or FALSE.", call. = FALSE)
