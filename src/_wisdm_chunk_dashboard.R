@@ -577,6 +577,7 @@ status_palette <- c(
 state_palette <- c(
   START = "#0d6efd",
   OK = "#198754",
+  REUSE = "#0f766e",
   SKIP = "#f59f00",
   ERROR = "#dc3545",
   DONE = "#198754",
@@ -761,6 +762,7 @@ body {
 .status-full_model_completed,
 .state-ok,
 .state-done { background: #198754; }
+.state-reuse { background: #0f766e; }
 .status-partial_climate_only { background: #b7791f; }
 .status-completed_unknown { background: #20c997; color: #102a43; }
 .status-running,

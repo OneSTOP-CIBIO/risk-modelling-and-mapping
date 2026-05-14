@@ -47,6 +47,12 @@
 #      project folder and terminal model file(s) still exist. This protects reruns
 #      after project folders were moved, deleted, or partially restored.
 #
+#   `reuse_successful_stages`
+#      If TRUE, retry attempts can reuse earlier stage outputs instead of running
+#      the stage again. Reuse is opt-in, only applies to attempt 2+, and requires
+#      both a prior successful/reused stage event and the downstream files that
+#      prove the stage output is still available.
+#
 #   `run_setup_01`
 #      If TRUE, stage 01 is run once per `project_prefix` under a shared setup
 #      lock. Other chunks skip it after the setup marker exists.
@@ -98,6 +104,7 @@ filter_value <- "Yes"
 retry_failed <- TRUE
 retry_skipped <- FALSE
 verify_completed_outputs <- TRUE
+reuse_successful_stages <- FALSE
 
 run_setup_01 <- TRUE
 force_setup_01 <- FALSE
@@ -516,6 +523,10 @@ empty_completed <- function() {
   as.data.frame(setNames(rep(list(character()), length(completed_columns)), completed_columns))
 }
 
+empty_events <- function() {
+  as.data.frame(setNames(rep(list(character()), length(event_columns)), event_columns))
+}
+
 read_registry_file <- function(path) {
   if (!csv_has_content(path)) {
     return(empty_registry())
@@ -561,6 +572,39 @@ read_completed_file <- function(path) {
   }
 
   completed[, completed_columns, drop = FALSE]
+}
+
+read_event_file <- function(path) {
+  if (!csv_has_content(path)) {
+    return(empty_events())
+  }
+
+  events <- suppressWarnings(readr::read_csv(
+    path,
+    col_types = readr::cols(.default = readr::col_character()),
+    show_col_types = FALSE
+  ))
+  events <- as.data.frame(events, stringsAsFactors = FALSE)
+
+  for (column in setdiff(event_columns, names(events))) {
+    events[[column]] <- NA_character_
+  }
+
+  events[, event_columns, drop = FALSE]
+}
+
+read_all_event_files <- function(control_dir) {
+  files <- list.files(
+    control_dir,
+    pattern = "^chunk_[0-9]+_events\\.csv$",
+    full.names = TRUE
+  )
+  files <- files[file.exists(files)]
+  if (length(files) == 0) {
+    return(empty_events())
+  }
+
+  dplyr::bind_rows(lapply(files, read_event_file))
 }
 
 modify_registry_row <- function(species_key, values) {
@@ -764,6 +808,169 @@ completed_outputs_ready <- function(registry_row) {
   climate_exists || habitat_exists
 }
 
+file_ready <- function(path) {
+  if (length(path) == 0 || is.null(path) || is.na(path) || !nzchar(path)) {
+    return(FALSE)
+  }
+  file.exists(path) && isTRUE(file.info(path)$size > 0)
+}
+
+all_files_ready <- function(paths) {
+  paths <- unique(paths[!is.na(paths) & nzchar(paths)])
+  length(paths) > 0 && all(vapply(paths, file_ready, logical(1)))
+}
+
+project_taxa_info_path <- function(project) {
+  file.path("data", "projects", project, paste0(project, "_taxa_info.csv"))
+}
+
+project_occurrences_path <- function(project) {
+  file.path("data", "projects", project, paste0(project, "_processed_occurrences.qs"))
+}
+
+climate_core_paths <- function(taxa_info) {
+  paths <- character()
+  for (row_index in seq_len(nrow(taxa_info))) {
+    species_name <- taxa_info$speciesName[[row_index]]
+    taxon_key <- taxa_info$acceptedTaxonKey[[row_index]]
+    base_dir <- taxa_info$base_dir[[row_index]]
+    base_file <- paste0(species_name, "_Climate_")
+
+    paths <- c(
+      paths,
+      file.path(base_dir, "Climate", paste0("Climate_model_", species_name, "_", taxon_key, ".qs")),
+      file.path(base_dir, "Climate", "Current", "Predictions", "Rasters", paste0(base_file, "current_ensemble.tif")),
+      file.path(base_dir, "Climate", "Current", "Interim", paste0(base_file, "current_ensemble_mean.tif")),
+      file.path(base_dir, "Climate", "Current", "Diagnostics", "Confidence_maps", "Rasters", paste0(base_file, "current_ensemble_SD.tif"))
+    )
+
+    for (period in c("2041-2070", "2071-2100")) {
+      for (scenario in c("ssp126", "ssp370", "ssp585")) {
+        paths <- c(
+          paths,
+          file.path(base_dir, "Climate", period, scenario, "Predictions", "Rasters", paste0(base_file, period, "_", scenario, "_ensemble.tif")),
+          file.path(base_dir, "Climate", "Current", "Interim", paste0(base_file, period, "_", scenario, "_ensemble_mean.tif")),
+          file.path(base_dir, "Climate", period, scenario, "Diagnostics", "Confidence_maps", "Rasters", paste0(base_file, period, "_", scenario, "_ensemble_SD.tif"))
+        )
+      }
+    }
+  }
+
+  unique(paths)
+}
+
+stage_02_outputs_ready <- function(project) {
+  all_files_ready(c(project_occurrences_path(project), project_taxa_info_path(project))) &&
+    !is.null(tryCatch(read_taxa_metadata(project), error = function(e) NULL))
+}
+
+stage_03_outputs_ready <- function(project) {
+  if (!stage_02_outputs_ready(project)) {
+    return(FALSE)
+  }
+
+  taxa_info <- tryCatch(read_taxa_metadata(project), error = function(e) NULL)
+  !is.null(taxa_info) && all_files_ready(climate_core_paths(taxa_info))
+}
+
+stage_04_outputs_ready <- function(project) {
+  taxa_info <- tryCatch(read_taxa_metadata(project), error = function(e) NULL)
+  !is.null(taxa_info) && all_files_ready(taxa_info$habitat_qs)
+}
+
+stage_04_climate_only_ready <- function(project) {
+  taxa_info <- tryCatch(read_taxa_metadata(project), error = function(e) NULL)
+  !is.null(taxa_info) && !any(file.exists(taxa_info$habitat_qs))
+}
+
+stage_05_outputs_ready <- function(project) {
+  file_ready(file.path("data", "projects", project, "Model_validation", "Validation_summary.csv"))
+}
+
+stage_outputs_ready <- function(stage_id, species_row) {
+  project <- species_row$project[[1]]
+  if (identical(stage_id, "02")) {
+    return(stage_02_outputs_ready(project))
+  }
+  if (identical(stage_id, "03")) {
+    return(stage_03_outputs_ready(project))
+  }
+  if (identical(stage_id, "04")) {
+    return(stage_04_outputs_ready(project))
+  }
+  if (identical(stage_id, "05")) {
+    return(stage_05_outputs_ready(project))
+  }
+
+  FALSE
+}
+
+latest_stage_event <- function(species_key, stage_id) {
+  events <- read_all_event_files(control_dir)
+  if (nrow(events) == 0) {
+    return(NULL)
+  }
+
+  events <- events[events$species_key == species_key & events$stage == stage_id, , drop = FALSE]
+  if (nrow(events) == 0) {
+    return(NULL)
+  }
+
+  events$row_order <- seq_len(nrow(events))
+  events$timestamp_sort <- suppressWarnings(as.POSIXct(events$timestamp, tz = Sys.timezone()))
+  events$timestamp_sort[is.na(events$timestamp_sort)] <- as.POSIXct("1970-01-01", tz = "UTC")
+  events <- events[order(events$timestamp_sort, events$row_order), , drop = FALSE]
+  events[nrow(events), event_columns, drop = FALSE]
+}
+
+stage_has_success_event <- function(stage_event) {
+  !is.null(stage_event) && stage_event$state[[1]] %in% c("OK", "REUSE")
+}
+
+stage_has_climate_only_skip_event <- function(stage_event) {
+  !is.null(stage_event) &&
+    identical(stage_event$stage[[1]], "04") &&
+    identical(stage_event$state[[1]], "SKIP") &&
+    isTRUE(grepl(
+      "no habitat model file; stage 05 will run climate validation only",
+      stage_event$message[[1]],
+      fixed = TRUE
+    ))
+}
+
+can_reuse_stage <- function(stage_id, species_row, attempt) {
+  if (!isTRUE(reuse_successful_stages)) {
+    return(list(reuse = FALSE, reason = "reuse_successful_stages is FALSE.", mode = "none"))
+  }
+  if (is.na(attempt) || attempt <= 1L) {
+    return(list(reuse = FALSE, reason = "Stage reuse only applies to retry attempts.", mode = "none"))
+  }
+
+  stage_event <- latest_stage_event(species_row$species_key[[1]], stage_id)
+  if (identical(stage_id, "04") &&
+      stage_has_climate_only_skip_event(stage_event) &&
+      stage_04_climate_only_ready(species_row$project[[1]])) {
+    return(list(
+      reuse = TRUE,
+      reason = "Reusing previous stage 04 climate-only decision; no habitat model file exists.",
+      mode = "climate_only"
+    ))
+  }
+
+  if (!stage_has_success_event(stage_event)) {
+    return(list(reuse = FALSE, reason = "No prior OK/REUSE event for this stage.", mode = "none"))
+  }
+  if (!stage_outputs_ready(stage_id, species_row)) {
+    return(list(reuse = FALSE, reason = "Required output file(s) for this stage are missing.", mode = "none"))
+  }
+
+  list(
+    reuse = TRUE,
+    reason = paste0("Reusing previous stage ", stage_id, " outputs from prior attempt."),
+    mode = "outputs"
+  )
+}
+
 
 #-------------------------------------------------------------------------------
 # Stage execution
@@ -939,6 +1146,19 @@ mark_stage_ok <- function(species_row, attempt, stage_id, message_text = "") {
   )
 }
 
+mark_stage_reused <- function(species_row, attempt, stage_id, message_text = "") {
+  modify_registry_row(species_row$species_key, list(stage = stage_id, error_message = ""))
+  append_event(
+    species_requested = species_row$species_requested,
+    species_key = species_row$species_key,
+    project = species_row$project,
+    attempt = attempt,
+    stage = stage_id,
+    state = "REUSE",
+    message_text = message_text
+  )
+}
+
 mark_species_failed <- function(species_row, attempt, stage_id, error_message, log_file = "") {
   modify_registry_row(
     species_row$species_key,
@@ -1013,6 +1233,59 @@ mark_species_completed <- function(species_row, attempt, outcome, taxa_info) {
     project = species_row$project,
     outcome = outcome
   )
+}
+
+handle_successful_stage_outputs <- function(species_row,
+                                            attempt,
+                                            stage_id,
+                                            index,
+                                            total,
+                                            reused = FALSE,
+                                            reuse_mode = "outputs") {
+  if (identical(stage_id, "02")) {
+    taxa_info <- read_taxa_metadata(species_row$project)
+    taxa_values <- taxa_summary_values(taxa_info)
+    modify_registry_row(
+      species_row$species_key,
+      list(
+        accepted_species = taxa_values$accepted_species,
+        accepted_taxonkey = taxa_values$accepted_taxonkey
+      )
+    )
+  }
+
+  if (identical(stage_id, "03")) {
+    taxa_info <- read_taxa_metadata(species_row$project)
+    if (!any(file.exists(taxa_info$climate_qs))) {
+      reason <- "Stage 03 finished without creating a climate model file."
+      mark_species_skipped(species_row, attempt, "03", "no_climate_model", reason)
+      runner_message("SKIP", species_row$species_requested, species_row$project, "03", index, total, reason)
+      return(FALSE)
+    }
+  }
+
+  if (identical(stage_id, "04")) {
+    taxa_info <- read_taxa_metadata(species_row$project)
+    if (!any(file.exists(taxa_info$habitat_qs))) {
+      if (isTRUE(reused) && identical(reuse_mode, "climate_only")) {
+        return(TRUE)
+      }
+
+      reason <- "Stage 04 finished without creating a habitat model file; stage 05 will run climate validation only."
+      append_event(
+        species_requested = species_row$species_requested,
+        species_key = species_row$species_key,
+        project = species_row$project,
+        attempt = attempt,
+        stage = "04",
+        state = "SKIP",
+        message_text = reason
+      )
+      runner_message("SKIP", species_row$species_requested, species_row$project, "04", index, total, reason)
+    }
+  }
+
+  TRUE
 }
 
 
@@ -1216,8 +1489,47 @@ process_species <- function(species_row, index, total) {
 
   tryCatch(
     {
+      upstream_reuse_chain <- TRUE
       for (stage_id in c("02", "03", "04", "05")) {
         current_stage <- stage_id
+
+        reuse_decision <- if (isTRUE(upstream_reuse_chain)) {
+          can_reuse_stage(stage_id, species_row, attempt)
+        } else {
+          list(
+            reuse = FALSE,
+            reason = "An upstream stage was rerun in this attempt.",
+            mode = "none"
+          )
+        }
+        if (isTRUE(reuse_decision$reuse)) {
+          mark_stage_reused(species_row, attempt, stage_id, reuse_decision$reason)
+          runner_message(
+            "REUSE",
+            species_row$species_requested,
+            species_row$project,
+            stage_id,
+            index,
+            total,
+            reuse_decision$reason
+          )
+
+          if (!handle_successful_stage_outputs(
+            species_row = species_row,
+            attempt = attempt,
+            stage_id = stage_id,
+            index = index,
+            total = total,
+            reused = TRUE,
+            reuse_mode = reuse_decision$mode
+          )) {
+            return(invisible(FALSE))
+          }
+
+          next
+        }
+
+        upstream_reuse_chain <- FALSE
 
         runner_message(
           "START",
@@ -1273,43 +1585,14 @@ process_species <- function(species_row, index, total) {
           paste0("Log: ", result$log_file)
         )
 
-        if (identical(stage_id, "02")) {
-          taxa_info <- read_taxa_metadata(species_row$project)
-          taxa_values <- taxa_summary_values(taxa_info)
-          modify_registry_row(
-            species_row$species_key,
-            list(
-              accepted_species = taxa_values$accepted_species,
-              accepted_taxonkey = taxa_values$accepted_taxonkey
-            )
-          )
-        }
-
-        if (identical(stage_id, "03")) {
-          taxa_info <- read_taxa_metadata(species_row$project)
-          if (!any(file.exists(taxa_info$climate_qs))) {
-            reason <- "Stage 03 finished without creating a climate model file."
-            mark_species_skipped(species_row, attempt, "03", "no_climate_model", reason)
-            runner_message("SKIP", species_row$species_requested, species_row$project, "03", index, total, reason)
-            return(invisible(FALSE))
-          }
-        }
-
-        if (identical(stage_id, "04")) {
-          taxa_info <- read_taxa_metadata(species_row$project)
-          if (!any(file.exists(taxa_info$habitat_qs))) {
-            reason <- "Stage 04 finished without creating a habitat model file; stage 05 will run climate validation only."
-            append_event(
-              species_requested = species_row$species_requested,
-              species_key = species_row$species_key,
-              project = species_row$project,
-              attempt = attempt,
-              stage = "04",
-              state = "SKIP",
-              message_text = reason
-            )
-            runner_message("SKIP", species_row$species_requested, species_row$project, "04", index, total, reason)
-          }
+        if (!handle_successful_stage_outputs(
+          species_row = species_row,
+          attempt = attempt,
+          stage_id = stage_id,
+          index = index,
+          total = total
+        )) {
+          return(invisible(FALSE))
         }
       }
 
@@ -1369,6 +1652,24 @@ dry_run_report <- function(active_species_table) {
       decision <- "would skip: previously failed"
     }
 
+    previous_attempt <- if (is.null(previous)) 0L else suppressWarnings(as.integer(previous$attempt[[1]]))
+    previous_attempt <- ifelse(is.na(previous_attempt), 0L, previous_attempt)
+    if (isTRUE(reuse_successful_stages) && previous_attempt > 0L && grepl("^would (retry|rerun|run)", decision)) {
+      candidate_attempt <- previous_attempt + 1L
+      upstream_reuse_chain <- TRUE
+      reusable_stages <- character()
+      for (stage_id in c("02", "03", "04", "05")) {
+        if (isTRUE(upstream_reuse_chain) && isTRUE(can_reuse_stage(stage_id, row, candidate_attempt)$reuse)) {
+          reusable_stages <- c(reusable_stages, stage_id)
+        } else {
+          upstream_reuse_chain <- FALSE
+        }
+      }
+      if (length(reusable_stages) > 0) {
+        decision <- paste0(decision, "; reusable stages: ", paste(reusable_stages, collapse = ", "))
+      }
+    }
+
     runner_message("SKIP", row$species_requested, row$project, "dry_run", i, nrow(active_species_table), decision)
   }
 
@@ -1405,6 +1706,11 @@ run_runner_settings_preflight <- function() {
       length(verify_completed_outputs) != 1 ||
       is.na(verify_completed_outputs)) {
     stop("verify_completed_outputs must be TRUE or FALSE.", call. = FALSE)
+  }
+  if (!is.logical(reuse_successful_stages) ||
+      length(reuse_successful_stages) != 1 ||
+      is.na(reuse_successful_stages)) {
+    stop("reuse_successful_stages must be TRUE or FALSE.", call. = FALSE)
   }
   if (!is.logical(run_setup_01) || length(run_setup_01) != 1 || is.na(run_setup_01)) {
     stop("run_setup_01 must be TRUE or FALSE.", call. = FALSE)
