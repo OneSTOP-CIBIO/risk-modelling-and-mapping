@@ -54,3 +54,6 @@ data/projects/
 data/external/gadm/
 data/external/file_paths_custom_data.csv
 data/external/file_paths_custom_landcover_data.csv
+
+# ignore md file documenting wiSDM v2.0 CIBIO alterations
+IAS_distribution_modelling_wisdm2_adaptations.md
