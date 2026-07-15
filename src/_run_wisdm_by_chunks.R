@@ -22,16 +22,10 @@
 #        <project_prefix>_<chunk_number>_<sanitized_species_name>
 #      Example: onestop_01_arthurdendyus_triangulatus
 #
-#   `species_list_path`
-#      Path to the Excel file containing the candidate species list.
-#
-#   `species_column`
-#      Column in `species_list_path` that contains the species names.
-#
-#   `filter_column` and `filter_value`
-#      Optional row filter used to select species from the list before chunking.
-#      Set `filter_column <- NULL` or `filter_column <- ""` to use all rows.
-#      `filter_value` may be a single value or a vector of accepted values.
+#   `species_list`
+#      Character vector with the scientific names to model. The runner trims
+#      whitespace, removes blank/NA values, and keeps unique names before
+#      chunking.
 #
 #   `retry_failed`
 #      If TRUE, a species previously logged as failed can be claimed again on a
@@ -93,13 +87,12 @@
 # User settings
 #-------------------------------------------------------------------------------
 n_blocks <- 6
-nr_active_block <- 1
+nr_active_block <- 6
 project_prefix <- "onestop"
 
-species_list_path <- file.path("data", "external", "Species_list_v5.xlsx")
-species_column <- "Species"
-filter_column <- "Modelling"
-filter_value <- "Yes"
+species_list <- c(
+  letters[1:5],"Carpobrotus edulis"
+)
 
 retry_failed <- TRUE
 retry_skipped <- FALSE
@@ -239,7 +232,6 @@ run_configuration_preflight <- function(config_path, config_guard) {
 
 run_input_path_preflight <- function(config_path,
                                      config_guard,
-                                     species_list_path,
                                      path_parameters = c(
                                        "user_specific_climate_data",
                                        "user_specific_landcover_data",
@@ -259,20 +251,6 @@ run_input_path_preflight <- function(config_path,
     stringsAsFactors = FALSE
   )
 
-  if (is.null(species_list_path) ||
-      length(species_list_path) != 1 ||
-      is.na(species_list_path) ||
-      !nzchar(species_list_path) ||
-      !file.exists(species_list_path)) {
-    missing_paths <- rbind(
-      missing_paths,
-      data.frame(
-        parameter = "species_list_path",
-        path = format_preflight_value(species_list_path),
-        stringsAsFactors = FALSE
-      )
-    )
-  }
 
   for (parameter in path_parameters) {
     if (!exists(parameter, envir = config_env, inherits = FALSE)) {
@@ -326,15 +304,14 @@ preflight_config_ok <- run_configuration_preflight(
 
 preflight_paths_ok <- run_input_path_preflight(
   config_path = file.path("src", "00_configurations.R"),
-  config_guard = config_guard,
-  species_list_path = species_list_path
+  config_guard = config_guard
 )
 
 
 #-------------------------------------------------------------------------------
 # Package setup
 #-------------------------------------------------------------------------------
-required_packages <- c("readxl", "dplyr", "stringr", "readr", "filelock", "digest")
+required_packages <- c("dplyr", "stringr", "readr", "filelock", "digest")
 installed_packages <- rownames(installed.packages())
 
 for (package in required_packages) {
@@ -685,30 +662,17 @@ append_completed_species <- function(species_requested, species_key, project, ou
 #-------------------------------------------------------------------------------
 # Species list and expected output helpers
 #-------------------------------------------------------------------------------
-load_species_list <- function(path, species_column, filter_column, filter_value) {
-  if (!file.exists(path)) {
-    stop("Species list file not found: ", path, call. = FALSE)
+normalize_species_list <- function(species_list) {
+  if (!is.character(species_list)) {
+    stop("species_list must be a character vector of scientific names.", call. = FALSE)
   }
 
-  species_table <- readxl::read_excel(path)
-
-  if (!species_column %in% names(species_table)) {
-    stop("Species column not found in species list: ", species_column, call. = FALSE)
-  }
-
-  if (!is.null(filter_column) && nzchar(filter_column)) {
-    if (!filter_column %in% names(species_table)) {
-      stop("Filter column not found in species list: ", filter_column, call. = FALSE)
-    }
-    species_table <- species_table[as.character(species_table[[filter_column]]) %in% filter_value, , drop = FALSE]
-  }
-
-  species <- trimws(as.character(species_table[[species_column]]))
+  species <- trimws(species_list)
   species <- species[!is.na(species) & nzchar(species)]
   species <- unique(species)
 
   if (length(species) == 0) {
-    stop("No species were selected from the species list.", call. = FALSE)
+    stop("species_list does not contain any usable species names.", call. = FALSE)
   }
 
   species
@@ -1929,12 +1893,7 @@ if (!identical(project_prefix_safe, project_prefix)) {
   message("Project prefix was sanitized from '", project_prefix, "' to '", project_prefix_safe, "'.")
 }
 
-all_species <- load_species_list(
-  path = species_list_path,
-  species_column = species_column,
-  filter_column = filter_column,
-  filter_value = filter_value
-)
+all_species <- normalize_species_list(species_list)
 
 chunk_assignments <- make_chunk_assignments(length(all_species), n_blocks)
 species_slugs <- make_unique_slugs(all_species)

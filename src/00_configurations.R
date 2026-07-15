@@ -1,9 +1,9 @@
 #--------------------------------------------
 #-------  Define wiSDM configurations -------
 #--------------------------------------------
-project <- "test_ias_axis_axis"  #TIP: don't use a long project name to avoid Windows errors
+#project <- "test_ias_axis_axis"  #TIP: don't use a long project name to avoid Windows errors
 
-species_to_model <- c("Axis axis")
+#species_to_model <- c("Axis axis")
 
 occurrence_thinning_method <- "kmeans_clustering" #either "random" or "kmeans_clustering"
 
