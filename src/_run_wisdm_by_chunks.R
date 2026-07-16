@@ -1763,6 +1763,37 @@ run_config_value_preflight <- function(config_path, config_guard, dry_run) {
     }
   }
 
+  if (exists("cv_folds", envir = config_env, inherits = FALSE)) {
+    cv_folds_value <- get("cv_folds", envir = config_env, inherits = FALSE)
+    if (length(cv_folds_value) != 1 ||
+        is.na(cv_folds_value) ||
+        cv_folds_value != as.integer(cv_folds_value) ||
+        cv_folds_value < 2) {
+      add_problem("cv_folds must be a single integer of at least 2.")
+    }
+  }
+
+  if (exists("cv_spatial_block_sizes_m", envir = config_env, inherits = FALSE)) {
+    block_sizes_value <- get("cv_spatial_block_sizes_m", envir = config_env, inherits = FALSE)
+    if (!is.numeric(block_sizes_value) ||
+        length(block_sizes_value) < 1 ||
+        any(is.na(block_sizes_value)) ||
+        any(!is.finite(block_sizes_value)) ||
+        any(block_sizes_value <= 0) ||
+        any(block_sizes_value != as.integer(block_sizes_value))) {
+      add_problem("cv_spatial_block_sizes_m must contain one or more positive integer metre values.")
+    } else if (any(diff(block_sizes_value) > 0)) {
+      add_problem("cv_spatial_block_sizes_m must be ordered from largest to smallest.")
+    }
+  }
+
+  if (exists("enable_kfold_cv_fallback", envir = config_env, inherits = FALSE)) {
+    fallback_value <- get("enable_kfold_cv_fallback", envir = config_env, inherits = FALSE)
+    if (!is.logical(fallback_value) || length(fallback_value) != 1 || is.na(fallback_value)) {
+      add_problem("enable_kfold_cv_fallback must be TRUE or FALSE.")
+    }
+  }
+
   if (exists("habitat_filter_near_zero_variance_predictors", envir = config_env, inherits = FALSE)) {
     habitat_nzv_value <- get("habitat_filter_near_zero_variance_predictors", envir = config_env, inherits = FALSE)
     if (!is.logical(habitat_nzv_value) || length(habitat_nzv_value) != 1 || is.na(habitat_nzv_value)) {

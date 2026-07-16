@@ -1255,7 +1255,11 @@ gc()
                         future_consensus_median = future_consensus_median,
                         climate_input_mode = climate_input_mode,
                         predictor_crs = predictor_crs,
-                        climate_manifest_path = climate_manifest_path)
+                        climate_manifest_path = climate_manifest_path,
+                        current_predictor_signature = build_predictor_signature(
+                          globalclimpreds_terra_selection,
+                          selected_predictor_names
+                        ))
     
     qs::qsave(climatemodel, file.path(base_dir, "Climate", paste0("Climate_model_",speciesName,"_",taxonkey,".qs")))
     

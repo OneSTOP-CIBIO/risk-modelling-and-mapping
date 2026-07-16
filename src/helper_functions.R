@@ -1665,6 +1665,347 @@ load_user_specific_landcover_manifest <- function(manifest_path) {
 
 
 #-----------------------------------------------------------------
+#--Validate only the current/current rows needed by validation----
+#-----------------------------------------------------------------
+load_user_specific_current_manifest <- function(manifest_path,
+                                                config_name,
+                                                data_label) {
+  manifest_path <- resolve_input_path(manifest_path)
+
+  if (!file.exists(manifest_path)) {
+    stop("The file provided in '", config_name, "' does not exist: ",
+         manifest_path, call. = FALSE)
+  }
+
+  manifest <- utils::read.csv(
+    manifest_path,
+    stringsAsFactors = FALSE,
+    check.names = FALSE
+  )
+  required_cols <- c("period", "scenario", "var_name", "file_path")
+  missing_cols <- setdiff(required_cols, names(manifest))
+
+  if (length(missing_cols) > 0L) {
+    stop(
+      "The ", data_label, " manifest is missing required columns: ",
+      paste(missing_cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  manifest <- manifest[, required_cols, drop = FALSE]
+  manifest[] <- lapply(manifest, function(x) trimws(as.character(x)))
+  manifest$period <- tolower(manifest$period)
+  manifest$scenario <- tolower(manifest$scenario)
+  current_rows <- manifest[
+    manifest$period == "current" & manifest$scenario == "current",
+    ,
+    drop = FALSE
+  ]
+
+  if (nrow(current_rows) == 0L) {
+    stop(
+      "The ", data_label,
+      " manifest must contain rows with period='current' and scenario='current'.",
+      call. = FALSE
+    )
+  }
+  if (any(is.na(current_rows$var_name)) || any(!nzchar(current_rows$var_name))) {
+    stop("The current ", data_label, " rows contain empty predictor names.",
+         call. = FALSE)
+  }
+  if (anyDuplicated(current_rows$var_name)) {
+    stop("The current ", data_label, " rows contain duplicated predictor names.",
+         call. = FALSE)
+  }
+  if (any(is.na(current_rows$file_path)) || any(!nzchar(current_rows$file_path))) {
+    stop("The current ", data_label, " rows contain empty raster paths.",
+         call. = FALSE)
+  }
+
+  manifest_dir <- dirname(manifest_path)
+  current_rows$file_path <- vapply(
+    current_rows$file_path,
+    resolve_input_path,
+    character(1),
+    base_dir = manifest_dir
+  )
+  missing_files <- unique(current_rows$file_path[!file.exists(current_rows$file_path)])
+  if (length(missing_files) > 0L) {
+    stop(
+      "The current ", data_label, " manifest rows reference files that do not exist: ",
+      paste(missing_files, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  rasters <- lapply(current_rows$file_path, terra::rast)
+  if (any(vapply(rasters, terra::nlyr, numeric(1)) != 1L)) {
+    stop("Each current raster in '", config_name,
+         "' must contain exactly one layer.", call. = FALSE)
+  }
+  reference <- rasters[[1]]
+  if (!nzchar(terra::crs(reference))) {
+    stop("The current ", data_label, " raster CRS is missing.", call. = FALSE)
+  }
+  alignment_ok <- vapply(
+    rasters[-1],
+    function(x) terra::compareGeom(
+      x,
+      reference,
+      lyrs = FALSE,
+      stopOnError = FALSE
+    ),
+    logical(1)
+  )
+  if (length(alignment_ok) > 0L && !all(alignment_ok)) {
+    stop(
+      "All current ", data_label,
+      " rasters must share the same grid, extent, resolution, and CRS.",
+      call. = FALSE
+    )
+  }
+
+  list(
+    manifest_path = manifest_path,
+    current_rows = current_rows,
+    future_rows = list(),
+    master_var_names = current_rows$var_name,
+    has_future = FALSE,
+    predictor_crs = terra::crs(reference)
+  )
+}
+
+
+#-----------------------------------------------------------------
+#--Build and compare a portable predictor-stack signature---------
+#-----------------------------------------------------------------
+build_predictor_signature <- function(predictor_stack,
+                                      predictor_names = names(predictor_stack)) {
+  missing_predictors <- setdiff(predictor_names, names(predictor_stack))
+  if (length(missing_predictors) > 0L) {
+    stop(
+      "Cannot build predictor signature; missing layer(s): ",
+      paste(missing_predictors, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  selected <- terra::subset(predictor_stack, predictor_names)
+  if (terra::nlyr(selected) == 0L) {
+    stop("Cannot build a predictor signature for an empty stack.", call. = FALSE)
+  }
+
+  list(
+    predictor_names = names(selected),
+    crs = terra::crs(selected),
+    nrow = as.integer(terra::nrow(selected)),
+    ncol = as.integer(terra::ncol(selected)),
+    resolution = as.numeric(terra::res(selected)),
+    extent = c(
+      xmin = terra::xmin(selected),
+      xmax = terra::xmax(selected),
+      ymin = terra::ymin(selected),
+      ymax = terra::ymax(selected)
+    )
+  )
+}
+
+
+validate_model_predictor_stack <- function(predictor_stack,
+                                           selected_predictors,
+                                           saved_crs = NULL,
+                                           saved_signature = NULL,
+                                           tolerance = 1e-7) {
+  missing_predictors <- setdiff(selected_predictors, names(predictor_stack))
+  if (length(missing_predictors) > 0L) {
+    return(list(
+      valid = FALSE,
+      legacy = is.null(saved_signature),
+      reason = paste0(
+        "missing selected predictor(s): ",
+        paste(missing_predictors, collapse = ", ")
+      ),
+      signature = NULL
+    ))
+  }
+
+  active_signature <- build_predictor_signature(
+    predictor_stack,
+    selected_predictors
+  )
+
+  if (!is.null(saved_signature)) {
+    required_fields <- c(
+      "predictor_names", "crs", "nrow", "ncol", "resolution", "extent"
+    )
+    missing_fields <- setdiff(required_fields, names(saved_signature))
+    if (length(missing_fields) > 0L) {
+      return(list(
+        valid = FALSE,
+        legacy = FALSE,
+        reason = paste0(
+          "saved predictor signature is missing field(s): ",
+          paste(missing_fields, collapse = ", ")
+        ),
+        signature = active_signature
+      ))
+    }
+
+    checks <- c(
+      predictor_names = identical(
+        as.character(saved_signature$predictor_names),
+        as.character(active_signature$predictor_names)
+      ),
+      crs = isTRUE(
+        sf::st_crs(saved_signature$crs) == sf::st_crs(active_signature$crs)
+      ),
+      dimensions = identical(
+        as.integer(c(saved_signature$nrow, saved_signature$ncol)),
+        as.integer(c(active_signature$nrow, active_signature$ncol))
+      ),
+      resolution = isTRUE(all.equal(
+        as.numeric(saved_signature$resolution),
+        active_signature$resolution,
+        tolerance = tolerance,
+        check.attributes = FALSE
+      )),
+      extent = isTRUE(all.equal(
+        as.numeric(saved_signature$extent),
+        active_signature$extent,
+        tolerance = tolerance,
+        check.attributes = FALSE
+      ))
+    )
+    if (!all(checks)) {
+      return(list(
+        valid = FALSE,
+        legacy = FALSE,
+        reason = paste0(
+          "predictor signature mismatch: ",
+          paste(names(checks)[!checks], collapse = ", ")
+        ),
+        signature = active_signature
+      ))
+    }
+  } else if (!is.null(saved_crs) && length(saved_crs) == 1L &&
+             !is.na(saved_crs) && nzchar(saved_crs) &&
+             !isTRUE(sf::st_crs(saved_crs) == sf::st_crs(active_signature$crs))) {
+    return(list(
+      valid = FALSE,
+      legacy = TRUE,
+      reason = "predictor CRS does not match the legacy model metadata",
+      signature = active_signature
+    ))
+  }
+
+  list(
+    valid = TRUE,
+    legacy = is.null(saved_signature),
+    reason = if (is.null(saved_signature)) {
+      "compatible by selected predictor names and CRS (legacy metadata)"
+    } else {
+      "compatible predictor signature"
+    },
+    signature = active_signature
+  )
+}
+
+
+#-----------------------------------------------------------------
+#--Resolve a saved manifest with a portable configured fallback---
+#-----------------------------------------------------------------
+resolve_model_current_predictors <- function(saved_manifest_path,
+                                             configured_manifest_path,
+                                             config_name,
+                                             data_label,
+                                             selected_predictors,
+                                             saved_crs = NULL,
+                                             saved_signature = NULL,
+                                             materialize = function(x) {
+                                               load_named_raster_stack(x$current_rows)
+                                             }) {
+  candidates <- c(
+    saved = if (is.null(saved_manifest_path)) NA_character_ else saved_manifest_path,
+    configured = if (is.null(configured_manifest_path)) NA_character_ else configured_manifest_path
+  )
+  candidates <- candidates[!is.na(candidates) & nzchar(candidates)]
+  if (length(candidates) > 1L) {
+    normalized <- vapply(candidates, resolve_input_path, character(1))
+    candidates <- candidates[!duplicated(tolower(normalized))]
+  }
+  if (length(candidates) == 0L) {
+    stop(
+      "The saved ", data_label,
+      " model requires user-specific predictors, but neither a saved nor configured manifest path is available.",
+      call. = FALSE
+    )
+  }
+
+  failures <- character(0)
+  for (candidate_name in names(candidates)) {
+    candidate_path <- candidates[[candidate_name]]
+    attempt <- tryCatch({
+      manifest <- load_user_specific_current_manifest(
+        manifest_path = candidate_path,
+        config_name = config_name,
+        data_label = data_label
+      )
+      predictor_stack <- materialize(manifest)
+      compatibility <- validate_model_predictor_stack(
+        predictor_stack = predictor_stack,
+        selected_predictors = selected_predictors,
+        saved_crs = saved_crs,
+        saved_signature = saved_signature
+      )
+      if (!isTRUE(compatibility$valid)) {
+        stop(compatibility$reason, call. = FALSE)
+      }
+      list(
+        manifest = manifest,
+        predictor_stack = predictor_stack,
+        compatibility = compatibility
+      )
+    }, error = function(e) e)
+
+    if (inherits(attempt, "error")) {
+      failures <- c(
+        failures,
+        paste0(candidate_name, " [", candidate_path, "]: ", conditionMessage(attempt))
+      )
+      next
+    }
+
+    if (identical(candidate_name, "configured") && length(failures) > 0L) {
+      warning(
+        "The saved ", data_label, " manifest could not be reused; using the configured manifest '",
+        attempt$manifest$manifest_path, "'. Saved-path failure: ",
+        paste(failures, collapse = " | "),
+        call. = FALSE
+      )
+    }
+    if (isTRUE(attempt$compatibility$legacy)) {
+      warning(
+        "The ", data_label,
+        " model predates portable predictor signatures. Compatibility was checked using selected predictor names and CRS only.",
+        call. = FALSE
+      )
+    }
+
+    return(c(
+      attempt,
+      list(source = candidate_name, failures = failures)
+    ))
+  }
+
+  stop(
+    "No compatible current ", data_label, " manifest could be resolved. ",
+    paste(failures, collapse = " | "),
+    call. = FALSE
+  )
+}
+
+
+#-----------------------------------------------------------------
 #--Get deterministic processed paths for user land-cover stacks---
 #-----------------------------------------------------------------
 get_user_specific_landcover_processed_target <- function(period = "current",
@@ -1711,6 +2052,506 @@ materialize_user_specific_landcover_stack <- function(stack_rows,
     signature_scope = paste0("user_specific_landcover__", period, "__", scenario, "__v1"),
     apply_common_na_mask = TRUE
   )
+}
+
+
+#-----------------------------------------------------------------
+#--Validate fold assignments across all required strata----------
+#-----------------------------------------------------------------
+validate_cv_context_classes <- function(records,
+                                        context_col = "cv_context",
+                                        class_col = "species") {
+  if (!all(c(context_col, class_col) %in% names(records))) {
+    return(list(valid = TRUE, reason = NA_character_))
+  }
+  contexts <- sort(unique(as.character(records[[context_col]])))
+  counts <- table(
+    factor(as.character(records[[context_col]]), levels = contexts),
+    factor(records[[class_col]], levels = c(0, 1))
+  )
+  missing_rows <- which(counts == 0L, arr.ind = TRUE)
+  if (nrow(missing_rows) == 0L) {
+    return(list(valid = TRUE, reason = NA_character_))
+  }
+  missing_labels <- paste0(
+    rownames(counts)[missing_rows[, "row"]],
+    " class ",
+    colnames(counts)[missing_rows[, "col"]]
+  )
+  list(
+    valid = FALSE,
+    reason = paste0(
+      "required context/class strata contain no records: ",
+      paste(missing_labels, collapse = ", ")
+    )
+  )
+}
+
+
+validate_cv_fold_assignments <- function(records,
+                                         fold_ids,
+                                         k,
+                                         stratum_col = "cv_stratum",
+                                         min_train = 2L,
+                                         min_test = 2L) {
+  if (!stratum_col %in% names(records)) {
+    stop("The CV records are missing '", stratum_col, "'.", call. = FALSE)
+  }
+  if (length(fold_ids) != nrow(records)) {
+    return(list(
+      valid = FALSE,
+      reason = paste0(
+        "fold assignment length ", length(fold_ids),
+        " differs from record count ", nrow(records)
+      ),
+      counts = data.frame(),
+      min_train_count = 0L,
+      min_test_count = 0L,
+      unassigned_count = as.integer(nrow(records))
+    ))
+  }
+  invalid_assignment <- is.na(fold_ids) | !fold_ids %in% seq_len(k)
+  if (any(invalid_assignment)) {
+    return(list(
+      valid = FALSE,
+      reason = "one or more records were not assigned to a valid fold",
+      counts = data.frame(),
+      min_train_count = 0L,
+      min_test_count = 0L,
+      unassigned_count = as.integer(sum(invalid_assignment))
+    ))
+  }
+
+  strata <- sort(unique(as.character(records[[stratum_col]])))
+  counts <- do.call(
+    rbind,
+    lapply(seq_len(k), function(fold) {
+      do.call(
+        rbind,
+        lapply(strata, function(stratum) {
+          in_stratum <- as.character(records[[stratum_col]]) == stratum
+          data.frame(
+            fold = fold,
+            stratum = stratum,
+            train_n = sum(in_stratum & fold_ids != fold),
+            test_n = sum(in_stratum & fold_ids == fold),
+            stringsAsFactors = FALSE
+          )
+        })
+      )
+    })
+  )
+  min_train_count <- if (nrow(counts) == 0L) 0L else min(counts$train_n)
+  min_test_count <- if (nrow(counts) == 0L) 0L else min(counts$test_n)
+  valid <- nrow(counts) > 0L &&
+    min_train_count >= min_train &&
+    min_test_count >= min_test
+
+  list(
+    valid = valid,
+    reason = if (valid) {
+      "all folds meet class-count requirements"
+    } else {
+      paste0(
+        "minimum train/test stratum counts are ",
+        min_train_count, "/", min_test_count,
+        "; required ", min_train, "/", min_test
+      )
+    },
+    counts = counts,
+    min_train_count = min_train_count,
+    min_test_count = min_test_count,
+    unassigned_count = 0L
+  )
+}
+
+
+cv_plan_attempt_row <- function(method,
+                                k,
+                                block_size_m,
+                                validation,
+                                reason = validation$reason) {
+  data.frame(
+    diagnostic_type = "partition_attempt",
+    cv_method = method,
+    effective_folds = as.integer(k),
+    block_size_m = if (is.null(block_size_m)) NA_real_ else as.numeric(block_size_m),
+    valid = isTRUE(validation$valid),
+    min_train_count = as.integer(validation$min_train_count),
+    min_test_count = as.integer(validation$min_test_count),
+    unassigned_records = if (is.null(validation$unassigned_count)) {
+      NA_integer_
+    } else {
+      as.integer(validation$unassigned_count)
+    },
+    reason = as.character(reason),
+    stringsAsFactors = FALSE
+  )
+}
+
+
+#-----------------------------------------------------------------
+#--Build adaptive spatial block folds-----------------------------
+#-----------------------------------------------------------------
+make_spatial_cv_plan <- function(records,
+                                 requested_folds,
+                                 block_sizes_m,
+                                 stratum_col = "cv_stratum",
+                                 min_train = 2L,
+                                 min_test = 2L,
+                                 seed = 123L,
+                                 iteration = 200L) {
+  if (!inherits(records, "sf") && !inherits(records, "SpatVector")) {
+    stop("Spatial CV records must be an sf or SpatVector object.", call. = FALSE)
+  }
+  requested_folds <- as.integer(requested_folds)
+  block_sizes_m <- as.numeric(block_sizes_m)
+  attempts <- list()
+  attempt_index <- 0L
+  context_validation <- validate_cv_context_classes(records)
+  if (!isTRUE(context_validation$valid)) {
+    validation <- list(
+      valid = FALSE,
+      reason = context_validation$reason,
+      min_train_count = 0L,
+      min_test_count = 0L,
+      unassigned_count = 0L
+    )
+    diagnostics <- cv_plan_attempt_row(
+      "spatial_block", requested_folds, NA_real_, validation
+    )
+    return(list(
+      valid = FALSE,
+      method = "spatial_block",
+      requested_folds = requested_folds,
+      k = NA_integer_,
+      block_size_m = NA_real_,
+      fold_ids = rep(NA_integer_, nrow(records)),
+      fold_counts = data.frame(),
+      fallback_reason = context_validation$reason,
+      diagnostics = diagnostics,
+      blockcv = NULL
+    ))
+  }
+
+  for (k in seq.int(requested_folds, 2L, by = -1L)) {
+    stratum_counts <- table(records[[stratum_col]])
+    if (length(stratum_counts) == 0L || any(stratum_counts < k * min_test)) {
+      attempt_index <- attempt_index + 1L
+      validation <- list(
+        valid = FALSE,
+        reason = "at least one stratum is too small for this fold count",
+        min_train_count = 0L,
+        min_test_count = 0L
+      )
+      attempts[[attempt_index]] <- cv_plan_attempt_row(
+        "spatial_block", k, NA_real_, validation
+      )
+      next
+    }
+
+    for (block_size_m in block_sizes_m) {
+      spatial_result <- tryCatch(
+        blockCV::cv_spatial(
+          x = records,
+          column = stratum_col,
+          k = k,
+          hexagon = TRUE,
+          selection = "random",
+          iteration = as.integer(iteration),
+          size = block_size_m,
+          seed = as.integer(seed),
+          progress = FALSE,
+          report = FALSE,
+          plot = FALSE
+        ),
+        error = function(e) e
+      )
+      attempt_index <- attempt_index + 1L
+
+      if (inherits(spatial_result, "error")) {
+        validation <- list(
+          valid = FALSE,
+          reason = conditionMessage(spatial_result),
+          min_train_count = 0L,
+          min_test_count = 0L
+        )
+        attempts[[attempt_index]] <- cv_plan_attempt_row(
+          "spatial_block", k, block_size_m, validation
+        )
+        next
+      }
+
+      fold_ids <- as.integer(spatial_result$folds_ids)
+      validation <- validate_cv_fold_assignments(
+        records = records,
+        fold_ids = fold_ids,
+        k = k,
+        stratum_col = stratum_col,
+        min_train = min_train,
+        min_test = min_test
+      )
+      attempts[[attempt_index]] <- cv_plan_attempt_row(
+        "spatial_block", k, block_size_m, validation
+      )
+
+      if (isTRUE(validation$valid)) {
+        return(list(
+          valid = TRUE,
+          method = "spatial_block",
+          requested_folds = requested_folds,
+          k = k,
+          block_size_m = block_size_m,
+          fold_ids = fold_ids,
+          fold_counts = validation$counts,
+          fallback_reason = NA_character_,
+          diagnostics = dplyr::bind_rows(attempts),
+          blockcv = spatial_result
+        ))
+      }
+    }
+  }
+
+  list(
+    valid = FALSE,
+    method = "spatial_block",
+    requested_folds = requested_folds,
+    k = NA_integer_,
+    block_size_m = NA_real_,
+    fold_ids = rep(NA_integer_, nrow(records)),
+    fold_counts = data.frame(),
+    fallback_reason = paste(unique(vapply(attempts, function(x) x$reason[[1]], character(1))), collapse = " | "),
+    diagnostics = dplyr::bind_rows(attempts),
+    blockcv = NULL
+  )
+}
+
+
+#-----------------------------------------------------------------
+#--Build grouped, stratified, deterministic non-spatial folds-----
+#-----------------------------------------------------------------
+make_stratified_kfold_plan <- function(records,
+                                       requested_folds,
+                                       stratum_col = "cv_stratum",
+                                       group_col = "cv_group",
+                                       min_train = 2L,
+                                       min_test = 2L,
+                                       seed = 123L,
+                                       iteration = 200L,
+                                       fallback_reason = NA_character_) {
+  if (!stratum_col %in% names(records)) {
+    stop("The CV records are missing '", stratum_col, "'.", call. = FALSE)
+  }
+  if (!group_col %in% names(records)) {
+    records[[group_col]] <- seq_len(nrow(records))
+  }
+
+  requested_folds <- as.integer(requested_folds)
+  context_validation <- validate_cv_context_classes(records)
+  if (!isTRUE(context_validation$valid)) {
+    validation <- list(
+      valid = FALSE,
+      reason = context_validation$reason,
+      min_train_count = 0L,
+      min_test_count = 0L,
+      unassigned_count = 0L
+    )
+    diagnostics <- cv_plan_attempt_row(
+      "stratified_kfold", requested_folds, NA_real_, validation
+    )
+    combined_reason <- paste(
+      stats::na.omit(c(fallback_reason, context_validation$reason)),
+      collapse = " | "
+    )
+    return(list(
+      valid = FALSE,
+      method = "not_evaluable",
+      requested_folds = requested_folds,
+      k = NA_integer_,
+      block_size_m = NA_real_,
+      fold_ids = rep(NA_integer_, nrow(records)),
+      fold_counts = data.frame(),
+      fallback_reason = combined_reason,
+      diagnostics = diagnostics,
+      blockcv = NULL
+    ))
+  }
+  strata <- sort(unique(as.character(records[[stratum_col]])))
+  group_ids <- unique(as.character(records[[group_col]]))
+  group_strata <- table(
+    factor(as.character(records[[group_col]]), levels = group_ids),
+    factor(as.character(records[[stratum_col]]), levels = strata)
+  )
+  attempts <- list()
+  attempt_index <- 0L
+
+  for (k in seq.int(requested_folds, 2L, by = -1L)) {
+    stratum_counts <- colSums(group_strata)
+    if (any(stratum_counts < k * min_test)) {
+      attempt_index <- attempt_index + 1L
+      validation <- list(
+        valid = FALSE,
+        reason = "at least one stratum is too small for this fold count",
+        min_train_count = 0L,
+        min_test_count = 0L
+      )
+      attempts[[attempt_index]] <- cv_plan_attempt_row(
+        "stratified_kfold", k, NA_real_, validation
+      )
+      next
+    }
+
+    best <- NULL
+    best_score <- Inf
+    for (iteration_id in seq_len(as.integer(iteration))) {
+      set.seed(as.integer(seed) + iteration_id + k * 1000L)
+      group_totals <- rowSums(group_strata)
+      order_groups <- order(
+        -apply(group_strata, 1, max),
+        -group_totals,
+        stats::runif(length(group_ids))
+      )
+      fold_counts <- matrix(0, nrow = k, ncol = length(strata))
+      fold_groups <- integer(k)
+      group_fold <- integer(length(group_ids))
+      target <- matrix(
+        rep(stratum_counts / k, each = k),
+        nrow = k,
+        ncol = length(strata)
+      )
+
+      for (group_index in order_groups) {
+        candidate_scores <- vapply(seq_len(k), function(fold) {
+          candidate_counts <- fold_counts
+          candidate_counts[fold, ] <- candidate_counts[fold, ] + group_strata[group_index, ]
+          imbalance <- sum(
+            ((candidate_counts - target)^2) /
+              matrix(rep(pmax(target[1, ], 1), each = k), nrow = k)
+          )
+          group_balance <- sum((replace(fold_groups, fold, fold_groups[fold] + 1L) -
+                                  (sum(fold_groups) + 1) / k)^2)
+          imbalance + group_balance * 1e-3
+        }, numeric(1))
+        chosen <- sample(which(candidate_scores == min(candidate_scores)), 1L)
+        group_fold[group_index] <- chosen
+        fold_counts[chosen, ] <- fold_counts[chosen, ] + group_strata[group_index, ]
+        fold_groups[chosen] <- fold_groups[chosen] + 1L
+      }
+
+      fold_map <- stats::setNames(group_fold, group_ids)
+      fold_ids <- as.integer(fold_map[as.character(records[[group_col]])])
+      validation <- validate_cv_fold_assignments(
+        records = records,
+        fold_ids = fold_ids,
+        k = k,
+        stratum_col = stratum_col,
+        min_train = min_train,
+        min_test = min_test
+      )
+      score <- if (isTRUE(validation$valid)) {
+        stats::sd(validation$counts$test_n)
+      } else {
+        Inf
+      }
+      if (score < best_score) {
+        best <- list(fold_ids = fold_ids, validation = validation)
+        best_score <- score
+      }
+      if (isTRUE(validation$valid) && isTRUE(all.equal(score, 0))) {
+        break
+      }
+    }
+
+    attempt_index <- attempt_index + 1L
+    if (is.null(best)) {
+      validation <- list(
+        valid = FALSE,
+        reason = "no grouped stratified assignment was generated",
+        min_train_count = 0L,
+        min_test_count = 0L
+      )
+    } else {
+      validation <- best$validation
+    }
+    attempts[[attempt_index]] <- cv_plan_attempt_row(
+      "stratified_kfold", k, NA_real_, validation
+    )
+
+    if (!is.null(best) && isTRUE(validation$valid)) {
+      return(list(
+        valid = TRUE,
+        method = "stratified_kfold",
+        requested_folds = requested_folds,
+        k = k,
+        block_size_m = NA_real_,
+        fold_ids = best$fold_ids,
+        fold_counts = validation$counts,
+        fallback_reason = fallback_reason,
+        diagnostics = dplyr::bind_rows(attempts),
+        blockcv = NULL
+      ))
+    }
+  }
+
+  list(
+    valid = FALSE,
+    method = "not_evaluable",
+    requested_folds = requested_folds,
+    k = NA_integer_,
+    block_size_m = NA_real_,
+    fold_ids = rep(NA_integer_, nrow(records)),
+    fold_counts = data.frame(),
+    fallback_reason = fallback_reason,
+    diagnostics = dplyr::bind_rows(attempts),
+    blockcv = NULL
+  )
+}
+
+
+make_preferred_cv_plan <- function(records,
+                                   requested_folds,
+                                   block_sizes_m,
+                                   enable_kfold_fallback = TRUE,
+                                   stratum_col = "cv_stratum",
+                                   group_col = "cv_group",
+                                   min_train = 2L,
+                                   min_test = 2L,
+                                   seed = 123L,
+                                   iteration = 200L) {
+  spatial_plan <- make_spatial_cv_plan(
+    records = records,
+    requested_folds = requested_folds,
+    block_sizes_m = block_sizes_m,
+    stratum_col = stratum_col,
+    min_train = min_train,
+    min_test = min_test,
+    seed = seed,
+    iteration = iteration
+  )
+  if (isTRUE(spatial_plan$valid)) {
+    return(spatial_plan)
+  }
+  if (!isTRUE(enable_kfold_fallback)) {
+    spatial_plan$method <- "not_evaluable"
+    return(spatial_plan)
+  }
+
+  kfold_plan <- make_stratified_kfold_plan(
+    records = records,
+    requested_folds = requested_folds,
+    stratum_col = stratum_col,
+    group_col = group_col,
+    min_train = min_train,
+    min_test = min_test,
+    seed = seed,
+    iteration = iteration,
+    fallback_reason = spatial_plan$fallback_reason
+  )
+  kfold_plan$diagnostics <- dplyr::bind_rows(
+    spatial_plan$diagnostics,
+    kfold_plan$diagnostics
+  )
+  kfold_plan
 }
 
 
@@ -1790,11 +2631,20 @@ compute_median_favourability_safe <- function(model,
                                               top5_methods,
                                               prev_ratio,
                                               min_successful_methods = 3L) {
-  
+  if (!is.list(datasets) || length(datasets) == 0L || is.null(names(datasets)) ||
+      any(!nzchar(names(datasets)))) {
+    stop("Prediction datasets must be a named, non-empty list.", call. = FALSE)
+  }
+  if (length(prev_ratio) != 1L || !is.finite(prev_ratio) || prev_ratio <= 0) {
+    stop("The prevalence ratio must be a finite positive value.", call. = FALSE)
+  }
+
   env_favourability <- list()
   successful_methods <- character(0)
   failed_methods <- character(0)
   failed_reasons <- list()
+  method_diagnostics <- list()
+  diagnostic_index <- 0L
   
   for (modelmethod in top5_methods) {
     
@@ -1805,31 +2655,73 @@ compute_median_favourability_safe <- function(model,
     method_error <- NULL
     
     for (dataset_name in names(datasets)) {
-      
-      dataset <- datasets[[dataset_name]]
-      IDs <- dataset$ID
-      dataset <- dplyr::select(dataset, -ID)
-      
+      dataset_input <- datasets[[dataset_name]]
       prediction_result <- tryCatch({
+        if (!is.data.frame(dataset_input)) {
+          dataset_input <- as.data.frame(dataset_input)
+        }
+        if (!"ID" %in% names(dataset_input)) {
+          stop("dataset is missing its stable 'ID' column", call. = FALSE)
+        }
+        if (nrow(dataset_input) == 0L) {
+          stop("dataset contains no usable rows", call. = FALSE)
+        }
+        if (anyDuplicated(dataset_input$ID)) {
+          stop("dataset contains duplicated stable IDs", call. = FALSE)
+        }
+        IDs <- dataset_input$ID
+        dataset <- dplyr::select(dataset_input, -ID)
+        if (ncol(dataset) == 0L) {
+          stop("dataset contains no predictor columns", call. = FALSE)
+        }
         dataset_suit <- predict(model,
                                 newdata = dataset,
                                 method = modelmethod)
-        dataset_prob <- as.data.frame(dataset_suit)[[1]]
+        dataset_suit_df <- as.data.frame(dataset_suit)
+        if (ncol(dataset_suit_df) == 0L) {
+          stop("prediction returned no columns", call. = FALSE)
+        }
+        dataset_prob <- dataset_suit_df[[1]]
+        if (length(dataset_prob) != nrow(dataset_input)) {
+          stop(
+            "prediction length ", length(dataset_prob),
+            " differs from input row count ", nrow(dataset_input),
+            call. = FALSE
+          )
+        }
+        if (any(!is.finite(dataset_prob))) {
+          stop("prediction contains non-finite values", call. = FALSE)
+        }
         dataset_fav <- favourability_from_prob(dataset_prob, prev_ratio)
-        
+        if (length(dataset_fav) != length(IDs) || any(!is.finite(dataset_fav))) {
+          stop("favourability transformation returned invalid values", call. = FALSE)
+        }
         data.frame(ID = IDs, fav = dataset_fav)
       }, error = function(e) {
         e
       })
-      
+
+      diagnostic_index <- diagnostic_index + 1L
       if (inherits(prediction_result, "error")) {
         method_failed <- TRUE
-        method_error <- conditionMessage(prediction_result)
+        method_error <- paste0(dataset_name, ": ", conditionMessage(prediction_result))
+        method_diagnostics[[diagnostic_index]] <- data.frame(
+          method = modelmethod,
+          dataset = dataset_name,
+          success = FALSE,
+          error = conditionMessage(prediction_result),
+          stringsAsFactors = FALSE
+        )
         break
       }
-      
+      method_diagnostics[[diagnostic_index]] <- data.frame(
+        method = modelmethod,
+        dataset = dataset_name,
+        success = TRUE,
+        error = NA_character_,
+        stringsAsFactors = FALSE
+      )
       method_predictions[[dataset_name]] <- prediction_result
-      rm(dataset, IDs)
     }
     
     if (method_failed) {
@@ -1849,7 +2741,8 @@ compute_median_favourability_safe <- function(model,
       successful_methods = successful_methods,
       failed_methods = failed_methods,
       failed_reasons = failed_reasons,
-      success_count = length(successful_methods)
+      success_count = length(successful_methods),
+      method_diagnostics = dplyr::bind_rows(method_diagnostics)
     ))
   }
   
@@ -1878,7 +2771,8 @@ compute_median_favourability_safe <- function(model,
     successful_methods = successful_methods,
     failed_methods = failed_methods,
     failed_reasons = failed_reasons,
-    success_count = length(successful_methods)
+    success_count = length(successful_methods),
+    method_diagnostics = dplyr::bind_rows(method_diagnostics)
   )
 }
 
@@ -1947,17 +2841,42 @@ compute_boyce_robust <- function(fit_vals, obs_vals) {
 #------------------------------------------
 #---Calculate model validation metrics ----
 #------------------------------------------
-compute_validation_metrics <- function(species, type, region, fold, all_suit_vals, occ_suit_vals, abs_suit_vals) {
-  
-  #Define number of presences and pseudoabsences
-  n_pres   <- length(occ_suit_vals)
-  n_abs    <- length(abs_suit_vals)
-  
-  #Define minimum number of presences and pseudoabsences needed
-  if (n_pres < 2L || n_abs < 2L)   return(c(fold = fold,
-                                            auc = NA_real_,
-                                            boyce = NA_real_,
-                                            tss = NA_real_))
+compute_validation_metrics <- function(species,
+                                       type,
+                                       region,
+                                       fold,
+                                       all_suit_vals,
+                                       occ_suit_vals,
+                                       abs_suit_vals) {
+  all_suit_vals <- as.numeric(all_suit_vals)
+  occ_suit_vals <- as.numeric(occ_suit_vals)
+  abs_suit_vals <- as.numeric(abs_suit_vals)
+  all_suit_vals <- all_suit_vals[is.finite(all_suit_vals)]
+  occ_suit_vals <- occ_suit_vals[is.finite(occ_suit_vals)]
+  abs_suit_vals <- abs_suit_vals[is.finite(abs_suit_vals)]
+
+  n_pres <- length(occ_suit_vals)
+  n_abs <- length(abs_suit_vals)
+  empty_metrics <- function() {
+    data.frame(
+      Species = species,
+      Type = type,
+      Region = region,
+      test_fold = fold,
+      n_pres = as.numeric(n_pres),
+      n_abs = as.numeric(n_abs),
+      auc = NA_real_,
+      boyce = NA_real_,
+      tss = NA_real_,
+      sens = NA_real_,
+      spec = NA_real_,
+      stringsAsFactors = FALSE
+    )
+  }
+
+  if (n_pres < 2L || n_abs < 2L || length(all_suit_vals) < 2L) {
+    return(empty_metrics())
+  }
   
   #---------------
   #----- AUC -----
@@ -2013,17 +2932,20 @@ compute_validation_metrics <- function(species, type, region, fold, all_suit_val
   #------------------
   #- Return metrics -
   #------------------
-  return(data.frame(Species = species,
-                    Type = type,
-                    Region = region,
-                    test_fold = fold, 
-                    n_pres = as.numeric(n_pres),
-                    n_abs = as.numeric(n_abs),
-                    auc = as.numeric(auc_val),
-                    boyce = as.numeric(boyce_val),
-                    tss = as.numeric(tss_val$TSS),
-                    sens = as.numeric(tss_val$sensitivity),
-                    spec = as.numeric(tss_val$specificity)))
+  data.frame(
+    Species = species,
+    Type = type,
+    Region = region,
+    test_fold = fold,
+    n_pres = as.numeric(n_pres),
+    n_abs = as.numeric(n_abs),
+    auc = as.numeric(auc_val),
+    boyce = as.numeric(boyce_val),
+    tss = as.numeric(tss_val$TSS),
+    sens = as.numeric(tss_val$sensitivity),
+    spec = as.numeric(tss_val$specificity),
+    stringsAsFactors = FALSE
+  )
  
 }
 
@@ -2032,23 +2954,56 @@ compute_validation_metrics <- function(species, type, region, fold, all_suit_val
 #--Extract raster values at presence/absence points and return----
 #-----------------------------------------------------------------
 extract_env <- function(pres_abs_points, raster) {
-  
+  if (terra::nlyr(raster) == 0L) {
+    stop("Cannot extract environmental values from an empty raster stack.",
+         call. = FALSE)
+  }
+  if (!"species" %in% names(pres_abs_points)) {
+    stop("Presence/absence points are missing the 'species' column.",
+         call. = FALSE)
+  }
+  if (!"ID" %in% names(pres_abs_points)) {
+    pres_abs_points$ID <- seq_len(nrow(pres_abs_points))
+  }
+  point_vector <- terra::vect(pres_abs_points)
+  if (!isTRUE(terra::same.crs(point_vector, raster))) {
+    point_vector <- terra::project(point_vector, raster)
+  }
   env_values <- terra::extract(raster,
-                               terra::vect(pres_abs_points),
+                               point_vector,
                                ID = FALSE,
                                xy = FALSE)
-  
-  # Combine with species label 
-  df <- cbind(species = pres_abs_points$species, 
-              ID = pres_abs_points$ID,
-              env_values)
+  if (nrow(env_values) != nrow(pres_abs_points) || ncol(env_values) == 0L) {
+    stop(
+      "Environmental extraction returned ", nrow(env_values), " row(s) and ",
+      ncol(env_values), " predictor column(s) for ", nrow(pres_abs_points),
+      " input point(s).",
+      call. = FALSE
+    )
+  }
+  df <- data.frame(
+    species = pres_abs_points$species,
+    ID = pres_abs_points$ID,
+    env_values,
+    check.names = FALSE
+  )
+  usable <- stats::complete.cases(df)
+  numeric_predictors <- vapply(df[, -(1:2), drop = FALSE], is.numeric, logical(1))
+  if (any(numeric_predictors)) {
+    usable <- usable & apply(
+      as.data.frame(df[, -(1:2), drop = FALSE][, numeric_predictors, drop = FALSE]),
+      1,
+      function(x) all(is.finite(x))
+    )
+  }
+  dropped <- df[!usable, c("species", "ID"), drop = FALSE]
+  df <- df[usable, , drop = FALSE]
 
-  #remove NA rows
-  df <- df[complete.cases(df), ]
-  
   list(
-    presences = df[df$species == 1, -1],
-    absences  = df[df$species == 0, -1]
+    presences = df[df$species == 1, -1, drop = FALSE],
+    absences = df[df$species == 0, -1, drop = FALSE],
+    complete = df,
+    dropped = dropped
   )
 }
 
@@ -2056,33 +3011,51 @@ extract_env <- function(pres_abs_points, raster) {
 #-----------------------------------------------------------------
 #--Calculate the geometric mean for ensemble validation------------
 #-----------------------------------------------------------------
-ensemble_geom_mean <- function(hab_df, clim_df, type,value_col_hab = "median_favourability", value_col_clim = "median_favourability") {
-  
+ensemble_geom_mean <- function(hab_df,
+                               clim_df,
+                               type,
+                               value_col_hab = "median_favourability",
+                               value_col_clim = "median_favourability",
+                               return_data = FALSE) {
+  required_hab <- c("ID", value_col_hab)
+  required_clim <- c("ID", value_col_clim)
+  if (length(setdiff(required_hab, names(hab_df))) > 0L ||
+      length(setdiff(required_clim, names(clim_df))) > 0L) {
+    stop("Ensemble inputs are missing stable IDs or favourability values.",
+         call. = FALSE)
+  }
+  if (anyDuplicated(hab_df$ID) || anyDuplicated(clim_df$ID)) {
+    stop("Ensemble inputs contain duplicated stable IDs.", call. = FALSE)
+  }
   merged <- dplyr::inner_join(hab_df, clim_df, by = "ID", suffix = c("_hab", "_clim"))
-  
-  geom_mean<-sqrt(merged[[paste0(value_col_hab, "_hab")]] *
-         merged[[paste0(value_col_clim, "_clim")]])
-  
+  geom_mean <- sqrt(merged[[paste0(value_col_hab, "_hab")]] *
+                      merged[[paste0(value_col_clim, "_clim")]])
+  keep <- is.finite(geom_mean)
+  merged <- merged[keep, , drop = FALSE]
+  geom_mean <- geom_mean[keep]
+
   #Create a message for printing
-  n_all  <- max(nrow(hab_df), nrow(clim_df))
+  n_all <- length(unique(c(hab_df$ID, clim_df$ID)))
   n_merged <- nrow(merged)
-  perc_retained <- 100 * n_merged / n_all
-  n_lost <- n_all  - n_merged
+  perc_retained <- if (n_all == 0L) 0 else 100 * n_merged / n_all
+  n_lost <- n_all - n_merged
 
   
   message(sprintf(paste("Ensemble validation:", "%d European",type ,"points retained (%.0f%%).",
     "%d point(s) excluded due to missing predictions in the climate or habitat model."
   ), n_merged, perc_retained, n_lost))
   
-  return(geom_mean)
+  if (isTRUE(return_data)) {
+    return(data.frame(ID = merged$ID, ensemble_favourability = geom_mean))
+  }
+  geom_mean
 }
 
 
 #-----------------------------------------------------------------
 #--Put NO CV validation data in right format ----------
 #-----------------------------------------------------------------
-summarise_validation<- function(df, validation){
-  
+summarise_validation <- function(df, validation = NULL) {
   #Check that all necessary columns are present
   required_cols <- c("Species", "Type", "Region", "test_fold","auc", "boyce", "tss", "sens", "spec")
   missing_cols <- setdiff(required_cols, names(df))
@@ -2091,41 +3064,124 @@ summarise_validation<- function(df, validation){
     stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
   }
   
-  if(validation=="Cross-validation"){
-    
-    df<-df %>%
-      dplyr::group_by(Species, Type, Region)%>%
-      dplyr::summarise(n_folds   = n_distinct(test_fold),
-                       mean_auc  = mean(auc, na.rm = TRUE),
-                       sd_auc    = sd(auc, na.rm = TRUE),
-                       mean_boyce = mean(boyce, na.rm = TRUE),
-                       sd_boyce   = sd(boyce, na.rm = TRUE),
-                       mean_tss  = mean(tss, na.rm = TRUE),
-                       sd_tss    = sd(tss, na.rm = TRUE),
-                       mean_sens  = mean(sens, na.rm = TRUE),
-                       sd_sens    = sd(sens, na.rm = TRUE),
-                       mean_spec  = mean(spec, na.rm = TRUE),
-                       sd_spec = sd(spec, na.rm = TRUE))%>%
-      dplyr::mutate(validation = "Cross-validation")
-  }else{
-  #Prepare data in right format
-  df<- df %>%
-  dplyr::transmute(Species,
-                   Type,
-                   Region,
-                   n_folds = NA_real_,
-                   mean_auc = auc,
-                   sd_auc = NA_real_,
-                   mean_boyce = boyce,
-                   sd_boyce = NA_real_,
-                   mean_tss = tss,
-                   sd_tss = NA_real_,
-                   mean_sens = sens,
-                   sd_sens = NA_real_,
-                   mean_spec = spec,
-                   sd_spec= NA_real_,
-                   validation = "No cross-validation")
- 
+  if (!"cv_method" %in% names(df)) {
+    inferred_method <- if (identical(validation, "Cross-validation")) {
+      "spatial_block"
+    } else if (identical(validation, "No cross-validation")) {
+      "no_cv"
+    } else if (!is.null(validation)) {
+      as.character(validation)
+    } else {
+      "not_evaluable"
+    }
+    df$cv_method <- inferred_method
   }
-  return(df)
+  defaults <- list(
+    requested_folds = NA_integer_,
+    effective_folds = NA_integer_,
+    block_size_m = NA_real_,
+    fallback_reason = NA_character_
+  )
+  for (column in names(defaults)) {
+    if (!column %in% names(df)) {
+      df[[column]] <- defaults[[column]]
+    }
+  }
+
+  safe_mean <- function(x) {
+    x <- x[is.finite(x)]
+    if (length(x) == 0L) NA_real_ else mean(x)
+  }
+  safe_sd <- function(x) {
+    x <- x[is.finite(x)]
+    if (length(x) < 2L) NA_real_ else stats::sd(x)
+  }
+
+  df %>%
+    dplyr::group_by(
+      Species, Type, Region, cv_method, requested_folds,
+      effective_folds, block_size_m, fallback_reason
+    ) %>%
+    dplyr::summarise(
+      n_folds = if (dplyr::first(cv_method) %in% c("spatial_block", "stratified_kfold")) {
+        dplyr::n_distinct(test_fold[!is.na(test_fold)])
+      } else {
+        0L
+      },
+      mean_auc = safe_mean(auc),
+      sd_auc = safe_sd(auc),
+      mean_boyce = safe_mean(boyce),
+      sd_boyce = safe_sd(boyce),
+      mean_tss = safe_mean(tss),
+      sd_tss = safe_sd(tss),
+      mean_sens = safe_mean(sens),
+      sd_sens = safe_sd(sens),
+      mean_spec = safe_mean(spec),
+      sd_spec = safe_sd(spec),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(validation = cv_method)
 }
+
+
+#-----------------------------------------------------------------
+#--Convert fortified summaries to the historical project schema--
+#-----------------------------------------------------------------
+as_legacy_validation_summary <- function(df) {
+  legacy_columns <- c(
+    "Species", "Type", "Region", "n_folds",
+    "mean_auc", "sd_auc", "mean_boyce", "sd_boyce",
+    "mean_tss", "sd_tss", "mean_sens", "sd_sens",
+    "mean_spec", "sd_spec", "validation"
+  )
+  metric_columns <- setdiff(legacy_columns, "validation")
+  missing_columns <- setdiff(metric_columns, names(df))
+  if (length(missing_columns) > 0L) {
+    stop(
+      "Cannot create the legacy validation summary; missing column(s): ",
+      paste(missing_columns, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  method <- if ("cv_method" %in% names(df)) {
+    as.character(df$cv_method)
+  } else if ("validation" %in% names(df)) {
+    as.character(df$validation)
+  } else {
+    rep(NA_character_, nrow(df))
+  }
+  validation_label <- dplyr::case_when(
+    method %in% c("spatial_block", "stratified_kfold", "Cross-validation") ~
+      "Cross-validation",
+    method %in% c("no_cv", "No cross-validation") ~
+      "No cross-validation",
+    method %in% c("not_evaluable", "Not evaluable") ~
+      "Not evaluable",
+    TRUE ~ method
+  )
+  legacy_n_folds <- as.numeric(df$n_folds)
+  legacy_n_folds[validation_label %in% c("No cross-validation", "Not evaluable")] <-
+    NA_real_
+
+  output <- df[, metric_columns, drop = FALSE]
+  output$n_folds <- legacy_n_folds
+  output$validation <- validation_label
+  output[, legacy_columns, drop = FALSE]
+}
+
+#-----------------------------------------------------------------
+#--Make species list string for the chunk runner--
+#-----------------------------------------------------------------
+
+rand_strings <- function(count = 10, n = 12, chars = c(letters, LETTERS, 0:9)) {
+  replicate(count, paste0(sample(chars, n, replace = TRUE), collapse = ""))
+}
+
+make_species_list <- function(sp_name, chunk_nr, n_chunks){
+  out<-rand_strings(n_chunks)
+  out[chunk_nr] <- sp_name
+  return(out)
+}
+
+

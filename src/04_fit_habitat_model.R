@@ -1599,6 +1599,10 @@ predict_future_habitat_ensemble <- function(model,
                          landcover_input_mode = landcover_input_mode,
                          landcover_manifest_path = landcover_manifest_path,
                          landcover_predictor_crs = terra::crs(habitat_stack),
+                         current_predictor_signature = build_predictor_signature(
+                           fullstack,
+                           names(fullstack)
+                         ),
                          habitat_nzv_filter_applied = habitat_nzv_filter_applied,
                          habitat_nzv_dropped_predictors = habitat_nzv_dropped_predictors,
                          landcover_future_mode = landcover_future_mode,

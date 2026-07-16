@@ -23,6 +23,12 @@ workflow <-"single_step" #either single_step or two_step
 
 boyce_background_size <- 50000 #Number of non NA pixels in Europe to be selected for Boyce index calculation
 
+cv_folds <- 5L #Requested maximum number of cross-validation folds; the effective number may be reduced when a class is too small
+
+cv_spatial_block_sizes_m <- c(100000L, 75000L, 50000L) #Spatial block sizes attempted, in metres, from most to least conservative
+
+enable_kfold_cv_fallback <- TRUE #If TRUE, use grouped stratified non-spatial k-fold CV only when no valid spatial partition can be evaluated
+
 user_specific_climate_data <- "./data/external/file_paths_custom_data.csv" #either NULL or a path to a CSV manifest with user-supplied climate rasters
 
 user_specific_landcover_data <- "./data/external/file_paths_custom_landcover_data.csv" #either NULL or a path to a CSV manifest with user-supplied land-cover rasters
