@@ -231,6 +231,27 @@ run_test("raster NA filtering reports class-specific dropped records", {
   assert_true(extracted$dropped$species[[1]] == 1L, "The dropped class was not retained.")
 })
 
+run_test("SpatVector background samples are not converted twice", {
+  raster <- terra::rast(nrows = 3, ncols = 3, xmin = 0, xmax = 3,
+                        ymin = 0, ymax = 3, crs = "EPSG:3857")
+  terra::values(raster) <- seq_len(terra::ncell(raster))
+  names(raster) <- "predictor"
+  sampled_points <- terra::spatSample(
+    raster,
+    size = 4L,
+    method = "random",
+    na.rm = TRUE,
+    as.points = TRUE
+  )
+  assert_true(inherits(sampled_points, "SpatVector"),
+              "Synthetic background sampling did not return a SpatVector.")
+  normalized <- as_spatvector_safe(sampled_points)
+  assert_true(inherits(normalized, "SpatVector"),
+              "The normalized background is not a SpatVector.")
+  values <- terra::extract(raster, normalized, ID = FALSE, xy = FALSE)
+  assert_true(nrow(values) == 4L, "Background extraction lost sampled points.")
+})
+
 run_test("rare European contexts remain independently plannable", {
   for (n_presence in c(21L, 25L, 30L)) {
     global <- data.frame(

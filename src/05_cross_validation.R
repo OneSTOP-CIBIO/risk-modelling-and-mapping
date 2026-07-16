@@ -107,7 +107,7 @@ sample_available_cells <- function(mask, requested_size, seed) {
 
 
 extract_background <- function(points, predictor_stack, ids) {
-  point_vector <- terra::vect(points)
+  point_vector <- as_spatvector_safe(points)
   if (!isTRUE(terra::same.crs(point_vector, predictor_stack))) {
     point_vector <- terra::project(point_vector, predictor_stack)
   }
@@ -151,7 +151,7 @@ filter_records_for_stack <- function(records, predictor_stack) {
 
 
 make_spatial_group <- function(records, reference_raster) {
-  point_vector <- terra::vect(records)
+  point_vector <- as_spatvector_safe(records)
   if (!isTRUE(terra::same.crs(point_vector, reference_raster))) {
     point_vector <- terra::project(point_vector, reference_raster)
   }
@@ -396,7 +396,7 @@ fit_sdm_fold <- function(train_points, predictor_stack, methods) {
     )
     sdm_data <- sdm::sdmData(
       species ~ .,
-      train = terra::vect(train_points),
+      train = as_spatvector_safe(train_points),
       predictors = predictor_stack
     )
     sdm::sdm(species ~ ., data = sdm_data, methods = methods)
@@ -1071,8 +1071,9 @@ for (i in seq_along(accepted_taxonkeys)) {
   if (nrow(biome) == 0L) {
     stop("No biome intersects the usable global occurrence records.", call. = FALSE)
   }
-  global_mask <- terra::crop(climate_selection[[1]], terra::vect(biome)) %>%
-    terra::mask(terra::vect(biome))
+  biome_vector <- as_spatvector_safe(biome)
+  global_mask <- terra::crop(climate_selection[[1]], biome_vector) %>%
+    terra::mask(biome_vector)
   global_sample <- sample_available_cells(global_mask, boyce_background_size, 728L)
   global_background <- extract_background(
     global_sample,
@@ -1082,16 +1083,16 @@ for (i in seq_along(accepted_taxonkeys)) {
 
   # European background points are sampled once so climate and habitat IDs align.
   climate_eu_mask <- terra::crop(
-    climate_selection[[1]], terra::vect(euboundary_climate)
-  ) %>% terra::mask(terra::vect(euboundary_climate))
+    climate_selection[[1]], as_spatvector_safe(euboundary_climate)
+  ) %>% terra::mask(as_spatvector_safe(euboundary_climate))
   if (has_habitat) {
     euboundary_habitat <- load_eu_boundary(
       custom_path = custom_eu_boundary_path,
       reference = habitat_selection[[1]]
     )
     habitat_eu_mask <- terra::crop(
-      habitat_selection[[1]], terra::vect(euboundary_habitat)
-    ) %>% terra::mask(terra::vect(euboundary_habitat))
+      habitat_selection[[1]], as_spatvector_safe(euboundary_habitat)
+    ) %>% terra::mask(as_spatvector_safe(euboundary_habitat))
     climate_on_habitat <- terra::project(climate_eu_mask, habitat_eu_mask)
     eu_sampling_mask <- terra::mask(habitat_eu_mask, climate_on_habitat)
   } else {

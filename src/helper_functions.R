@@ -2951,6 +2951,17 @@ compute_validation_metrics <- function(species,
 
 
 #-----------------------------------------------------------------
+#--Normalize supported spatial point objects to a SpatVector------
+#-----------------------------------------------------------------
+as_spatvector_safe <- function(x) {
+  if (inherits(x, "SpatVector")) {
+    return(x)
+  }
+  terra::vect(x)
+}
+
+
+#-----------------------------------------------------------------
 #--Extract raster values at presence/absence points and return----
 #-----------------------------------------------------------------
 extract_env <- function(pres_abs_points, raster) {
@@ -2965,7 +2976,7 @@ extract_env <- function(pres_abs_points, raster) {
   if (!"ID" %in% names(pres_abs_points)) {
     pres_abs_points$ID <- seq_len(nrow(pres_abs_points))
   }
-  point_vector <- terra::vect(pres_abs_points)
+  point_vector <- as_spatvector_safe(pres_abs_points)
   if (!isTRUE(terra::same.crs(point_vector, raster))) {
     point_vector <- terra::project(point_vector, raster)
   }
