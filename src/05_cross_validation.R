@@ -6,7 +6,7 @@
 # Load packages
 #-------------------------------------------------------------------------------
 packages <- c(
-  "dplyr", "qs", "terra", "tidyterra", "sf", "here", "matrixStats",
+  "dplyr", "qs", "digest", "terra", "tidyterra", "sf", "here", "matrixStats",
   "ggplot2", "dismo", "sdm", "purrr", "ecospat", "blockCV"
 )
 
@@ -81,6 +81,7 @@ accepted_taxonkeys <- unique(taxa_info$acceptedTaxonKey)
 
 validation_dir <- file.path("data", "projects", project, "Model_validation")
 dir.create(validation_dir, recursive = TRUE, showWarnings = FALSE)
+validate_output_directory(validation_dir)
 validation_summary <- list()
 validation_diagnostics <- list()
 
@@ -861,9 +862,16 @@ write_metric_outputs <- function(metrics,
                                  per_fold_filename,
                                  summary_filename) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
-  readr::write_csv(metrics, file.path(output_dir, per_fold_filename))
+  validate_output_directory(output_dir)
+  readr::write_csv(
+    metrics,
+    fortify_output_path(file.path(output_dir, per_fold_filename))
+  )
   summary <- summarise_validation(metrics)
-  readr::write_csv(summary, file.path(output_dir, summary_filename))
+  readr::write_csv(
+    summary,
+    fortify_output_path(file.path(output_dir, summary_filename))
+  )
   summary
 }
 
@@ -878,7 +886,7 @@ for (i in seq_along(accepted_taxonkeys)) {
 
   species <- taxa_info$acceptedScientificName[i]
   taxonkey <- taxa_info$acceptedTaxonKey[i]
-  speciesName <- sub("^(\\w+)\\s+(\\w+).*", "\\1_\\2", species)
+  speciesName <- species_output_stem(species)
   message(
     "\n", strrep("=", 72),
     "\nSPECIES: ", speciesName, "  [taxonkey: ", taxonkey, "]",
@@ -1348,7 +1356,10 @@ for (i in seq_along(accepted_taxonkeys)) {
   validation_diagnostics[[speciesName]] <- species_diagnostics_df
   readr::write_csv(
     species_diagnostics_df,
-    file.path(validation_dir, paste0(speciesName, "_cross_validation_diagnostics.csv"))
+    fortify_output_path(file.path(
+      validation_dir,
+      paste0(speciesName, "_cross_validation_diagnostics.csv")
+    ))
   )
 
   rm(climate_model_artifact, habitat_model_artifact)
@@ -1363,15 +1374,15 @@ for (i in seq_along(accepted_taxonkeys)) {
 final_validation_extended <- dplyr::bind_rows(validation_summary)
 readr::write_csv(
   final_validation_extended,
-  file.path(validation_dir, "Validation_summary_extended.csv")
+  fortify_output_path(file.path(validation_dir, "Validation_summary_extended.csv"))
 )
 final_validation <- as_legacy_validation_summary(final_validation_extended)
 readr::write_csv(
   final_validation,
-  file.path(validation_dir, "Validation_summary.csv")
+  fortify_output_path(file.path(validation_dir, "Validation_summary.csv"))
 )
 final_diagnostics <- dplyr::bind_rows(validation_diagnostics)
 readr::write_csv(
   final_diagnostics,
-  file.path(validation_dir, "Cross_validation_diagnostics.csv")
+  fortify_output_path(file.path(validation_dir, "Cross_validation_diagnostics.csv"))
 )

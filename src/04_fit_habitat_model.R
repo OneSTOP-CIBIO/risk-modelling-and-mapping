@@ -4,7 +4,7 @@
 options("rgdal_show_exportToProj4_warnings"="none")
 terra::setGDALconfig("GDAL_PAM_ENABLED", "FALSE")#Prevent terra from writing aux.xml files
 
-packages <- c( "viridis","dplyr", "here", "qs", "tidyterra","sf", "ggplot2",
+packages <- c( "viridis","dplyr", "here", "qs", "digest", "tidyterra","sf", "ggplot2",
                "RColorBrewer","magick","patchwork","grid", "randomForest", 
                "progressr", "raster", "dismo", "caret", "caretEnsemble", 
                "kableExtra","gbm", "PresenceAbsence", "RStoolbox", "sdm", 
@@ -178,10 +178,11 @@ predict_future_habitat_ensemble <- function(model,
       unique()
     
     #Extract first two words of species name
-    speciesName <- sub("^(\\w+)\\s+(\\w+).*", "\\1_\\2", species)
+    speciesName <- species_output_stem(species)
+    name_parts <- scientific_name_output_parts(species)
     
     #Extract rest of species name
-    nameExtension <- if (grepl("^\\S+\\s+\\S+$", species)) "" else sub("^\\S+\\s+\\S+\\s+", "", species)
+    nameExtension <- name_parts$authorship
     
     #Specify species for plot title
     species_title <- gsub("_", " ", speciesName)
@@ -194,7 +195,7 @@ predict_future_habitat_ensemble <- function(model,
     #-- Prepare filenames and titles for export --
     #---------------------------------------------
     #Prepare PDF title 
-    PDF_title<-bquote(italic(.(gsub("_", " ", speciesName))) ~ .(nameExtension) ~ "(" * .(taxonkey) * ")")
+    PDF_title<-bquote(italic(.(name_parts$taxon_label)) ~ .(nameExtension) ~ "(" * .(taxonkey) * ")")
     
     #Prepare current and future basefile
     basefile<-  paste0(speciesName, "_Habitat_")
@@ -280,7 +281,9 @@ predict_future_habitat_ensemble <- function(model,
     #------------ Import raster layers ----------
     #--------------------------------------------
     #Define file paths
-    biasgrid_file <- file.path(base_dir,"Climate", "Current", "Interim", paste0("Biasgrid_",speciesName,"_",taxonkey,".tif"))
+    biasgrid_file <- fortify_output_path(
+      file.path(base_dir,"Climate", "Current", "Interim", paste0("Biasgrid_",speciesName,"_",taxonkey,".tif"))
+    )
     #Load rasterlayers
     habitat_stack <- terra::rast(habitatstack_file)
     biasgrid_sub <- terra::rast(biasgrid_file)
@@ -340,6 +343,9 @@ predict_future_habitat_ensemble <- function(model,
     # Check and create each folder if necessary
     lapply(scenario_folders, function(folder){
       create_folder(folder$path, folder$name)
+      if (identical(basename(folder$path), "Rasters")) {
+        validate_output_directory(folder$path)
+      }
     })
     
     
@@ -921,7 +927,7 @@ predict_future_habitat_ensemble <- function(model,
     # Export ensemble raster (favorability) 
     current_habitat_folder <- file.path(base_dir, "Habitat", "Current", "Predictions", "Rasters")
     habitat_ensemble_file <- file.path(current_habitat_folder, paste0(base_file,".tif"))
-    terra::writeRaster(ensemble_habitat_suitability, filename = habitat_ensemble_file, overwrite = TRUE)
+    write_raster_safely(ensemble_habitat_suitability, filename = habitat_ensemble_file, overwrite = TRUE)
     
     
     #--------------------------------------------------
@@ -946,7 +952,7 @@ predict_future_habitat_ensemble <- function(model,
     # Export ensemble raster (favorability) 
     current_sd_habitat_folder <- file.path(base_dir, "Habitat", "Current", "Diagnostics", "Confidence_maps", "Rasters")
     habitat_sd_ensemble_file <- file.path(current_sd_habitat_folder, paste0(filename,".tif"))
-    terra::writeRaster(ensemble_habitat_sd, filename = habitat_sd_ensemble_file, overwrite = TRUE)
+    write_raster_safely(ensemble_habitat_sd, filename = habitat_sd_ensemble_file, overwrite = TRUE)
     
     
     #------------------------------------------
@@ -997,7 +1003,7 @@ predict_future_habitat_ensemble <- function(model,
       
       #Store raster
       binary_file <- file.path (raster_folder, paste0(basefile,"current_binary",mtp_value,"pct.tif"))
-      terra::writeRaster(binary_map_pct, filename = binary_file, overwrite = TRUE)
+      write_raster_safely(binary_map_pct, filename = binary_file, overwrite = TRUE)
       
       # export as PDF and PNG with and without occurrences plotted 
       base_file<- paste0(basefile, "current_binary",mtp_value,"pct")
@@ -1096,6 +1102,7 @@ predict_future_habitat_ensemble <- function(model,
     }else{
       file.path(climate_raster_folder, paste0(speciesName,"_Climate_current_ensemble.tif"))
     }
+    current_climate_file <- fortify_output_path(current_climate_file)
     
     if (use_user_specific_climate_saved) {
       consensus_climate <- terra::rast(current_climate_file)
@@ -1137,7 +1144,7 @@ predict_future_habitat_ensemble <- function(model,
     # Export continuous suitability raster
     clim_hab_file <- file.path(base_dir, "Combined", "Current", "Predictions", "Rasters",
                                paste0(base_file,".tif"))
-    terra::writeRaster(ensemble_combined_suitability, filename = clim_hab_file, overwrite = T)
+    write_raster_safely(ensemble_combined_suitability, filename = clim_hab_file, overwrite = TRUE)
     
     #Export PDFs with and without occurrences plotted
     for (occs in list(NULL, combined_occ_current)){
@@ -1161,10 +1168,14 @@ predict_future_habitat_ensemble <- function(model,
     #----- Create maps with final SD predictions ------
     #--------------------------------------------------
     #Load climate layers
-    mean_climate_path<- file.path( base_dir,"Climate", "Current", "Interim",
-                                   paste0(global_basefile, "current_ensemble_mean.tif"))
-    sd_climate_path <- file.path( base_dir,"Climate", "Current","Diagnostics", "Confidence_maps", "Rasters",
-                                  paste0(global_basefile, "current_ensemble_SD.tif"))
+    mean_climate_path <- fortify_output_path(file.path(
+      base_dir, "Climate", "Current", "Interim",
+      paste0(global_basefile, "current_ensemble_mean.tif")
+    ))
+    sd_climate_path <- fortify_output_path(file.path(
+      base_dir, "Climate", "Current", "Diagnostics", "Confidence_maps", "Rasters",
+      paste0(global_basefile, "current_ensemble_SD.tif")
+    ))
     consensus_climate_mean <- terra::rast(mean_climate_path)
     consensus_climate_sd <- terra::rast(sd_climate_path)
     
@@ -1207,7 +1218,7 @@ predict_future_habitat_ensemble <- function(model,
     #Export raster file
     clim_comb_sd_file <- file.path(base_dir, "Combined", "Current", "Diagnostics", "Confidence_maps", "Rasters",
                                    paste0(filename,".tif"))
-    terra::writeRaster(Final_SD, filename = clim_comb_sd_file, overwrite = T)
+    write_raster_safely(Final_SD, filename = clim_comb_sd_file, overwrite = TRUE)
     
     #Export PDFs and PNGs
     exportPDF(predictions = Final_SD,
@@ -1250,7 +1261,7 @@ predict_future_habitat_ensemble <- function(model,
       #Store raster
       raster_folder <- file.path(base_dir, "Combined","Current", "Predictions", "Rasters")
       binary_file <- file.path (raster_folder, paste0(combined_basefile,"current_binary",mtp_value,"pct.tif"))
-      terra::writeRaster(binary_map_pct, filename = binary_file, overwrite = TRUE)
+      write_raster_safely(binary_map_pct, filename = binary_file, overwrite = TRUE)
       
       # export as PDF and PNG with and without occurrences plotted 
       base_file<- paste0(combined_basefile, "current_binary",mtp_value,"pct")
@@ -1343,7 +1354,7 @@ predict_future_habitat_ensemble <- function(model,
           
           future_habitat_folder <- file.path(base_dir, "Habitat", period, scenario, "Predictions", "Rasters")
           future_habitat_file <- file.path(future_habitat_folder, paste0(basefile, period, "_", scenario, "_ensemble.tif"))
-          terra::writeRaster(future_habitat_suitability, filename = future_habitat_file, overwrite = TRUE)
+          write_raster_safely(future_habitat_suitability, filename = future_habitat_file, overwrite = TRUE)
           
           base_file <- paste0(basefile, scenario, "_", period, "_ensemble")
           for (occs in list(NULL, future_habitat_occ)){
@@ -1365,8 +1376,8 @@ predict_future_habitat_ensemble <- function(model,
           future_habitat_conf_folder <- file.path(base_dir, "Habitat", period, scenario, "Diagnostics", "Confidence_maps", "Rasters")
           future_habitat_mean_file <- file.path(future_habitat_conf_folder, paste0(basefile, period, "_", scenario, "_ensemble_mean.tif"))
           future_habitat_sd_file <- file.path(future_habitat_conf_folder, paste0(basefile, period, "_", scenario, "_ensemble_SD.tif"))
-          terra::writeRaster(future_habitat_mean, filename = future_habitat_mean_file, overwrite = TRUE)
-          terra::writeRaster(future_habitat_sd, filename = future_habitat_sd_file, overwrite = TRUE)
+          write_raster_safely(future_habitat_mean, filename = future_habitat_mean_file, overwrite = TRUE)
+          write_raster_safely(future_habitat_sd, filename = future_habitat_sd_file, overwrite = TRUE)
           
           filename <- paste0(basefile, period, "_", scenario, "_ensemble_SD")
           exportPDF(predictions = future_habitat_sd,
@@ -1396,7 +1407,7 @@ predict_future_habitat_ensemble <- function(model,
               future_habitat_folder,
               paste0(basefile, period, "_", scenario, "_binary", mtp_thr, ".tif")
             )
-            terra::writeRaster(future_habitat_binary, filename = future_habitat_binary_file, overwrite = TRUE)
+            write_raster_safely(future_habitat_binary, filename = future_habitat_binary_file, overwrite = TRUE)
             
             base_file <- paste0(basefile, period, "_", scenario, "_binary", mtp_thr)
             for (occs in list(NULL, future_habitat_occ)){
@@ -1425,7 +1436,10 @@ predict_future_habitat_ensemble <- function(model,
         
         #Get climate data for specific period and scenario
         future_folder <- file.path(base_dir, "Climate", period, scenario, "Predictions", "Rasters")
-        ensemble_file <- file.path(future_folder, paste0(global_basefile, period,"_",scenario,"_ensemble.tif"))
+        ensemble_file <- fortify_output_path(file.path(
+          future_folder,
+          paste0(global_basefile, period, "_", scenario, "_ensemble.tif")
+        ))
         future_climate <- terra::rast(ensemble_file)
         
         if (use_user_specific_climate_saved) {
@@ -1443,7 +1457,7 @@ predict_future_habitat_ensemble <- function(model,
         # Export future ensemble raster (favorability) 
         future_folder <- file.path(base_dir, "Combined", period, scenario, "Predictions", "Rasters")
         ensemble_file <- file.path(future_folder, paste0(combined_basefile, period,"_",scenario,"_ensemble.tif"))
-        terra::writeRaster(final_ensemble, filename = ensemble_file, overwrite = TRUE)
+        write_raster_safely(final_ensemble, filename = ensemble_file, overwrite = TRUE)
         
         # Export ensemble predictions as PDF and PNG with and without occurrences
         base_file <- paste0(combined_basefile, scenario,"_", period,"_ensemble")
@@ -1484,7 +1498,7 @@ predict_future_habitat_ensemble <- function(model,
           #Store raster
           future_combined_folder <- file.path(base_dir, "Combined", period, scenario, "Predictions", "Rasters")
           binary_file <- file.path(future_combined_folder, paste0(combined_basefile, period,"_",scenario,"_binary",mtp_thr,".tif"))
-          terra::writeRaster(binary_map_future, filename = binary_file, overwrite = TRUE)
+          write_raster_safely(binary_map_future, filename = binary_file, overwrite = TRUE)
           
           # Export binarized ensemble predictions as PDF and PNG with and without occurrences 
           base_file <- paste0(combined_basefile, period,"_", scenario, "_binary",mtp_thr)
@@ -1514,9 +1528,15 @@ predict_future_habitat_ensemble <- function(model,
         #--------------------------------
         #Define file paths for future climate SD and mean files
         future_sd_folder <- file.path(base_dir, "Climate", period, scenario, "Diagnostics", "Confidence_maps", "Rasters")
-        sd_future_climate_path <-  file.path(future_sd_folder, paste0(global_basefile, period,"_",scenario,"_ensemble_SD.tif"))
+        sd_future_climate_path <- fortify_output_path(file.path(
+          future_sd_folder,
+          paste0(global_basefile, period, "_", scenario, "_ensemble_SD.tif")
+        ))
         future_mean_folder <- file.path(base_dir, "Climate", "Current", "Interim")
-        mean_future_climate_path <- file.path(future_mean_folder, paste0(global_basefile, period,"_",scenario,"_ensemble_mean.tif"))
+        mean_future_climate_path <- fortify_output_path(file.path(
+          future_mean_folder,
+          paste0(global_basefile, period, "_", scenario, "_ensemble_mean.tif")
+        ))
         
         #Load future climate SD and mean files
         consensus_future_climate_mean <- terra::rast(mean_future_climate_path)
@@ -1559,7 +1579,7 @@ predict_future_habitat_ensemble <- function(model,
         #Export raster file
         future_sd_file <- file.path(base_dir, "Combined", period, scenario, "Diagnostics", "Confidence_maps", "Rasters",
                                     paste0(filename,".tif"))
-        terra::writeRaster(Final_future_SD, filename = future_sd_file, overwrite = T)
+        write_raster_safely(Final_future_SD, filename = future_sd_file, overwrite = TRUE)
         
         #Export PDFs and PNGs
         exportPDF(predictions = Final_future_SD,
@@ -1628,7 +1648,12 @@ predict_future_habitat_ensemble <- function(model,
                               "remove_nodata_occurrences", "favourability_from_prob", 
                               "mtp_probabilities", "occurrence_thinning_method", 
                               "mtp_probabilities", "pseudoabsence_thinning_method", 
-                              "country_of_interest", "kmeans_with_center_fallback")))
+                              "country_of_interest", "kmeans_with_center_fallback",
+                              "species_output_stem", "scientific_name_output_parts", "fortify_output_path",
+                              "validate_output_directory", "write_raster_safely",
+                              ".stable_output_digest", ".output_path_info", ".format_output_path_info",
+                              ".sanitize_output_filename", ".validate_portable_directory_components",
+                              ".verify_written_raster", ".restore_raster_backup")))
     
     #Clean terra tempfiles
     terra::tmpFiles(remove = TRUE)

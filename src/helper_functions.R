@@ -748,9 +748,11 @@ confidenceMaps<-function(x,original_raster,taxonName, taxonNameTitle, nameExtens
   
   #Export raster
   raster_file<-paste(taxonName, "_", taxonKey, "_", scenario, "_confidence_", regionName, ".tif", sep="")
-  terra::writeRaster(rst_to_export,
-                     filename=file.path(folder, raster_file),
-                     overwrite=TRUE)
+  write_raster_safely(
+    rst_to_export,
+    filename = file.path(folder, raster_file),
+    overwrite = TRUE
+  )
   #Print
   print(paste(raster_file," has been created.", sep=""))
   
@@ -1249,10 +1251,13 @@ build_manifest_stack_signature <- function(stack_rows,
 materialize_processed_manifest_stack <- function(stack_rows,
                                                  output_file,
                                                  signature_scope = "manifest_stack_v1",
-                                                 signature_file = paste0(output_file, ".signature.txt"),
+                                                 signature_file = NULL,
                                                  apply_common_na_mask = TRUE) {
-  output_file <- resolve_input_path(output_file)
-  signature_file <- resolve_input_path(signature_file)
+  output_file <- fortify_output_path(resolve_input_path(output_file))
+  if (is.null(signature_file)) {
+    signature_file <- paste0(output_file, ".signature.txt")
+  }
+  signature_file <- fortify_output_path(resolve_input_path(signature_file))
   
   if (!dir.exists(dirname(output_file))) {
     dir.create(dirname(output_file), recursive = TRUE, showWarnings = FALSE)
@@ -1278,7 +1283,7 @@ materialize_processed_manifest_stack <- function(stack_rows,
     stack <- terra::mask(stack, anyNA(stack), maskvalue = 1)
   }
   
-  terra::writeRaster(
+  write_raster_safely(
     stack,
     filename = output_file,
     overwrite = TRUE,
@@ -1344,7 +1349,9 @@ materialize_user_specific_current_stack <- function(climate_manifest,
   }
   
   cache_key <- build_user_specific_climate_cache_key(climate_manifest)
-  cache_file <- file.path(cache_dir, paste0(cache_prefix, "_", cache_key, ".tif"))
+  cache_file <- fortify_output_path(
+    file.path(cache_dir, paste0(cache_prefix, "_", cache_key, ".tif"))
+  )
   expected_names <- as.character(climate_manifest$current_rows$var_name)
   
   if (file.exists(cache_file)) {
@@ -1360,7 +1367,7 @@ materialize_user_specific_current_stack <- function(climate_manifest,
   stack <- load_named_raster_stack(climate_manifest$current_rows)
   stack <- terra::mask(stack, anyNA(stack), maskvalue = 1)
   
-  terra::writeRaster(
+  write_raster_safely(
     stack,
     filename = cache_file,
     overwrite = TRUE,
@@ -2025,9 +2032,10 @@ get_user_specific_landcover_processed_target <- function(period = "current",
     )
   }
   
+  raster_file <- fortify_output_path(raster_file)
   list(
     raster_file = raster_file,
-    signature_file = paste0(raster_file, ".signature.txt")
+    signature_file = fortify_output_path(paste0(raster_file, ".signature.txt"))
   )
 }
 
@@ -2958,6 +2966,493 @@ as_spatvector_safe <- function(x) {
     return(x)
   }
   terra::vect(x)
+}
+
+
+#-----------------------------------------------------------------------------------
+# Build a portable species stem for output folders and files
+#-----------------------------------------------------------------------------------
+.stable_output_digest <- function(x, length = 10L) {
+  if (!requireNamespace("digest", quietly = TRUE)) {
+    stop(
+      "Package 'digest' is required to create collision-resistant output names.",
+      call. = FALSE
+    )
+  }
+
+  substr(
+    digest::digest(enc2utf8(as.character(x)), algo = "xxhash64", serialize = FALSE),
+    1L,
+    as.integer(length)
+  )
+}
+
+
+scientific_name_output_parts <- function(scientific_name) {
+  if (length(scientific_name) != 1L || is.na(scientific_name) ||
+      !nzchar(trimws(as.character(scientific_name)))) {
+    stop("scientific_name must be one non-empty value.", call. = FALSE)
+  }
+
+  original <- trimws(as.character(scientific_name))
+  normalized <- gsub("[[:space:]]+", " ", original, perl = TRUE)
+  normalized <- gsub("[\u00d7\u2715\u2716]", " × ", normalized, perl = TRUE)
+  tokens <- strsplit(trimws(normalized), "[[:space:]]+", perl = TRUE)[[1]]
+  taxon_indices <- which(!tokens %in% c("×", "x", "X"))
+
+  if (length(taxon_indices) < 2L) {
+    stop(
+      "Cannot derive a genus-and-species output name from scientific name '",
+      original, "'.",
+      call. = FALSE
+    )
+  }
+
+  second_taxon_index <- taxon_indices[[2]]
+  list(
+    original = original,
+    taxon_tokens = tokens[taxon_indices[1:2]],
+    taxon_label = paste(tokens[seq_len(second_taxon_index)], collapse = " "),
+    authorship = if (second_taxon_index < length(tokens)) {
+      paste(tokens[(second_taxon_index + 1L):length(tokens)], collapse = " ")
+    } else {
+      ""
+    }
+  )
+}
+
+
+species_output_stem <- function(scientific_name, max_chars = 60L) {
+  if (length(max_chars) != 1L || is.na(max_chars) ||
+      max_chars != as.integer(max_chars) || max_chars < 24L) {
+    stop("max_chars must be one integer of at least 24.", call. = FALSE)
+  }
+
+  name_parts <- scientific_name_output_parts(scientific_name)
+  original <- name_parts$original
+
+  taxon_tokens <- iconv(
+    name_parts$taxon_tokens, from = "", to = "ASCII//TRANSLIT", sub = ""
+  )
+  taxon_tokens[is.na(taxon_tokens)] <- ""
+  taxon_tokens <- gsub("[^A-Za-z0-9]+", "_", taxon_tokens)
+  taxon_tokens <- gsub("^_+|_+$", "", taxon_tokens)
+  stem <- gsub("_+", "_", paste(taxon_tokens, collapse = "_"))
+  stem <- gsub("^_+|_+$", "", stem)
+
+  if (!nzchar(stem) || length(taxon_tokens) != 2L || any(!nzchar(taxon_tokens))) {
+    stop(
+      "Cannot create a filesystem-safe genus-and-species output name from '",
+      original, "'.",
+      call. = FALSE
+    )
+  }
+
+  if (nchar(stem) > max_chars) {
+    digest_suffix <- .stable_output_digest(
+      paste(name_parts$taxon_tokens, collapse = " "), length = 10L
+    )
+    prefix_chars <- max_chars - nchar(digest_suffix) - 1L
+    stem <- paste0(substr(stem, 1L, prefix_chars), "_", digest_suffix)
+    stem <- gsub("_+", "_", stem)
+  }
+
+  legacy_stem <- sub("^(\\w+)\\s+(\\w+).*", "\\1_\\2", original)
+  if (!identical(stem, legacy_stem)) {
+    message("Species output stem fortified: '", original, "' -> '", stem, "'.")
+  }
+
+  stem
+}
+
+
+#-----------------------------------------------------------------------------------
+# Inspect and fortify output paths before they reach GDAL/terra
+#-----------------------------------------------------------------------------------
+.output_path_info <- function(path) {
+  absolute <- normalizePath(path.expand(path), winslash = "/", mustWork = FALSE)
+  list(
+    supplied = path,
+    supplied_chars = nchar(path),
+    supplied_bytes = nchar(path, type = "bytes"),
+    absolute = absolute,
+    absolute_chars = nchar(absolute),
+    absolute_bytes = nchar(absolute, type = "bytes")
+  )
+}
+
+
+.format_output_path_info <- function(info) {
+  paste0(
+    "supplied='", info$supplied, "' (", info$supplied_chars, " chars/",
+    info$supplied_bytes, " bytes); absolute='", info$absolute, "' (",
+    info$absolute_chars, " chars/", info$absolute_bytes, " bytes)"
+  )
+}
+
+
+.sanitize_output_filename <- function(filename) {
+  extension <- tools::file_ext(filename)
+  extension <- if (nzchar(extension)) {
+    paste0(".", gsub("[^A-Za-z0-9]+", "", extension))
+  } else {
+    ""
+  }
+  stem <- if (nzchar(tools::file_ext(filename))) {
+    tools::file_path_sans_ext(filename)
+  } else {
+    filename
+  }
+
+  stem <- iconv(stem, from = "", to = "ASCII//TRANSLIT", sub = "")
+  if (is.na(stem)) stem <- ""
+  stem <- gsub("[^A-Za-z0-9._-]+", "_", stem)
+  stem <- gsub("_+", "_", stem)
+  stem <- gsub("^[. _-]+|[. _-]+$", "", stem)
+  if (!nzchar(stem)) stem <- "output"
+
+  windows_reserved <- grepl(
+    "^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$",
+    toupper(stem)
+  )
+  if (windows_reserved) stem <- paste0("_", stem)
+
+  list(stem = stem, extension = extension, filename = paste0(stem, extension))
+}
+
+
+.validate_portable_directory_components <- function(absolute_directory) {
+  components <- strsplit(absolute_directory, "/", fixed = TRUE)[[1]]
+  components <- components[nzchar(components)]
+  components <- components[!grepl("^[A-Za-z]:$", components)]
+  if (length(components) == 0L) return(invisible(TRUE))
+
+  reserved_base <- toupper(tools::file_path_sans_ext(components))
+  invalid <- grepl("[<>:\"|?*]|[[:cntrl:]]|[. ]$", components) |
+    nchar(components) > 255L |
+    grepl("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$", reserved_base)
+  if (any(invalid)) {
+    stop(
+      "Output directory contains Windows-incompatible component(s): ",
+      paste(unique(components[invalid]), collapse = ", "),
+      ". Directory='", absolute_directory, "'.",
+      call. = FALSE
+    )
+  }
+
+  invisible(TRUE)
+}
+
+
+validate_output_directory <- function(directory,
+                                      max_path_chars = 240L,
+                                      minimum_leaf_chars = 32L) {
+  if (length(directory) != 1L || is.na(directory) || !nzchar(directory)) {
+    stop("directory must be one non-empty path.", call. = FALSE)
+  }
+  if (length(max_path_chars) != 1L || is.na(max_path_chars) ||
+      max_path_chars != as.integer(max_path_chars) || max_path_chars < 80L) {
+    stop("max_path_chars must be one integer of at least 80.", call. = FALSE)
+  }
+  if (length(minimum_leaf_chars) != 1L || is.na(minimum_leaf_chars) ||
+      minimum_leaf_chars != as.integer(minimum_leaf_chars) || minimum_leaf_chars < 16L) {
+    stop("minimum_leaf_chars must be one integer of at least 16.", call. = FALSE)
+  }
+
+  info <- .output_path_info(directory)
+  .validate_portable_directory_components(info$absolute)
+  required_chars <- info$absolute_chars + 1L + minimum_leaf_chars
+  if (required_chars > max_path_chars) {
+    stop(
+      "Output directory leaves insufficient room for a safe filename under the ",
+      max_path_chars, "-character path limit: ", .format_output_path_info(info),
+      "; minimum required total length=", required_chars, ".",
+      call. = FALSE
+    )
+  }
+
+  invisible(info$absolute)
+}
+
+
+fortify_output_path <- function(path, max_path_chars = 240L) {
+  if (length(path) != 1L || is.na(path) || !nzchar(path)) {
+    stop("path must be one non-empty value.", call. = FALSE)
+  }
+
+  directory <- dirname(path)
+  validate_output_directory(
+    directory,
+    max_path_chars = max_path_chars,
+    minimum_leaf_chars = 32L
+  )
+
+  original_filename <- basename(path)
+  safe <- .sanitize_output_filename(original_filename)
+  original_info <- .output_path_info(path)
+  if (identical(safe$filename, original_filename) &&
+      original_info$absolute_chars <= max_path_chars &&
+      nchar(original_filename) <= 255L) {
+    return(path)
+  }
+  candidate <- file.path(directory, safe$filename)
+  candidate_info <- .output_path_info(candidate)
+  absolute_directory <- normalizePath(
+    path.expand(directory), winslash = "/", mustWork = FALSE
+  )
+  available_leaf_chars <- max_path_chars - nchar(absolute_directory) - 1L
+  available_leaf_chars <- min(available_leaf_chars, 255L)
+
+  if (available_leaf_chars < 32L) {
+    stop(
+      "Output directory cannot accommodate a safe filename under the ",
+      max_path_chars, "-character path limit: ",
+      .format_output_path_info(.output_path_info(directory)), ".",
+      call. = FALSE
+    )
+  }
+
+  if (candidate_info$absolute_chars > max_path_chars ||
+      nchar(safe$filename) > available_leaf_chars) {
+    digest_suffix <- .stable_output_digest(original_filename, length = 10L)
+    stem_budget <- available_leaf_chars - nchar(safe$extension)
+    content_budget <- stem_budget - nchar(digest_suffix) - 2L
+    if (content_budget < 8L) {
+      stop(
+        "Output directory leaves too little room to create a collision-resistant filename: ",
+        .format_output_path_info(.output_path_info(directory)), ".",
+        call. = FALSE
+      )
+    }
+
+    head_chars <- max(4L, floor(content_budget * 0.35))
+    tail_chars <- content_budget - head_chars
+    stem_chars <- nchar(safe$stem)
+    head_part <- substr(safe$stem, 1L, min(head_chars, stem_chars))
+    tail_part <- if (tail_chars > 0L) {
+      substr(safe$stem, max(1L, stem_chars - tail_chars + 1L), stem_chars)
+    } else {
+      ""
+    }
+    compact_stem <- paste(head_part, digest_suffix, tail_part, sep = "_")
+    compact_stem <- gsub("_+", "_", compact_stem)
+    compact_stem <- substr(compact_stem, 1L, stem_budget)
+    candidate <- file.path(directory, paste0(compact_stem, safe$extension))
+    candidate_info <- .output_path_info(candidate)
+  }
+
+  if (candidate_info$absolute_chars > max_path_chars ||
+      nchar(basename(candidate)) > 255L) {
+    stop(
+      "Unable to fortify output path beneath filesystem limits: ",
+      .format_output_path_info(candidate_info), ".",
+      call. = FALSE
+    )
+  }
+
+  if (!identical(candidate, path)) {
+    message(
+      "Output path fortified (", original_info$absolute_chars, " -> ",
+      candidate_info$absolute_chars, " absolute chars): '", path, "' -> '",
+      candidate, "'."
+    )
+  }
+
+  candidate
+}
+
+
+#-----------------------------------------------------------------------------------
+# Stage, verify, and safely promote a raster output
+#-----------------------------------------------------------------------------------
+.verify_written_raster <- function(path, source_raster) {
+  if (!file.exists(path)) {
+    stop("written file does not exist", call. = FALSE)
+  }
+  size <- file.info(path)$size
+  if (is.na(size) || size <= 0) {
+    stop("written file is empty", call. = FALSE)
+  }
+
+  written <- tryCatch(
+    terra::rast(path),
+    error = function(e) {
+      stop("written file cannot be reopened: ", conditionMessage(e), call. = FALSE)
+    }
+  )
+  if (terra::nlyr(written) != terra::nlyr(source_raster) ||
+      !isTRUE(terra::compareGeom(
+        written, source_raster, lyrs = FALSE, stopOnError = FALSE
+      ))) {
+    stop("written raster geometry or layer count differs from the source", call. = FALSE)
+  }
+
+  invisible(TRUE)
+}
+
+
+.restore_raster_backup <- function(backup, target) {
+  if (is.null(backup) || !file.exists(backup)) return(invisible(TRUE))
+  if (file.exists(target)) unlink(target, force = TRUE)
+  restored <- suppressWarnings(file.rename(backup, target))
+  if (!isTRUE(restored)) {
+    restored <- file.copy(backup, target, overwrite = TRUE, copy.mode = TRUE)
+    if (isTRUE(restored)) unlink(backup, force = TRUE)
+  }
+  invisible(isTRUE(restored))
+}
+
+
+write_raster_safely <- function(x,
+                                filename,
+                                overwrite = FALSE,
+                                ...,
+                                max_path_chars = 240L) {
+  logical_filename <- filename
+  target <- fortify_output_path(filename, max_path_chars = max_path_chars)
+  target_info <- .output_path_info(target)
+  logical_info <- .output_path_info(logical_filename)
+  target_directory <- dirname(target)
+
+  if (!dir.exists(target_directory)) {
+    created <- dir.create(
+      target_directory, recursive = TRUE, showWarnings = FALSE
+    )
+    if (!isTRUE(created) && !dir.exists(target_directory)) {
+      stop(
+        "Raster write failed because the output directory could not be created. ",
+        "Logical path: ", .format_output_path_info(logical_info), ". Resolved path: ",
+        .format_output_path_info(target_info), ".",
+        call. = FALSE
+      )
+    }
+  }
+
+  had_target <- file.exists(target)
+  if (had_target && !isTRUE(overwrite)) {
+    stop("Raster output already exists and overwrite=FALSE: ", target, call. = FALSE)
+  }
+
+  extension <- tools::file_ext(target)
+  extension <- if (nzchar(extension)) paste0(".", extension) else ".tif"
+  staging <- tempfile(
+    pattern = ".wr_",
+    tmpdir = target_directory,
+    fileext = extension
+  )
+  backup <- NULL
+  promoted <- FALSE
+  on.exit({
+    if (file.exists(staging)) unlink(staging, force = TRUE)
+    if (!is.null(backup) && file.exists(backup)) {
+      if (!promoted) {
+        restored <- .restore_raster_backup(backup, target)
+        if (!isTRUE(restored) && file.exists(backup)) {
+          warning(
+            "Previous raster output could not be restored automatically; backup retained at ",
+            backup, ".",
+            call. = FALSE
+          )
+        }
+      } else if (file.exists(backup)) {
+        unlink(backup, force = TRUE)
+      }
+    }
+  }, add = TRUE)
+
+  stage_error <- tryCatch(
+    {
+      terra::writeRaster(x, filename = staging, overwrite = TRUE, ...)
+      .verify_written_raster(staging, x)
+      NULL
+    },
+    error = function(e) conditionMessage(e)
+  )
+  if (!is.null(stage_error)) {
+    stop(
+      "Raster write failed during staging. Logical path: ",
+      .format_output_path_info(logical_info), ". Resolved path: ",
+      .format_output_path_info(target_info), ". Underlying write error: ",
+      stage_error,
+      call. = FALSE
+    )
+  }
+
+  if (had_target) {
+    backup <- tempfile(
+      pattern = ".wb_",
+      tmpdir = target_directory,
+      fileext = extension
+    )
+    backed_up <- suppressWarnings(file.rename(target, backup))
+    if (!isTRUE(backed_up)) {
+      backed_up <- file.copy(target, backup, overwrite = FALSE, copy.mode = TRUE)
+      if (isTRUE(backed_up)) unlink(target, force = TRUE)
+    }
+    if (!isTRUE(backed_up) || file.exists(target)) {
+      if (file.exists(target) && !is.null(backup) && file.exists(backup)) {
+        unlink(backup, force = TRUE)
+        backup <- NULL
+      }
+      stop(
+        "Raster write failed while backing up the existing target. Logical path: ",
+        .format_output_path_info(logical_info), ". Resolved path: ",
+        .format_output_path_info(target_info), ".",
+        call. = FALSE
+      )
+    }
+  }
+
+  promotion_errors <- character()
+  renamed <- suppressWarnings(file.rename(staging, target))
+  if (!isTRUE(renamed)) {
+    promotion_errors <- c(promotion_errors, "rename returned FALSE")
+    copied <- tryCatch(
+      file.copy(staging, target, overwrite = FALSE, copy.mode = TRUE),
+      error = function(e) {
+        promotion_errors <<- c(promotion_errors, conditionMessage(e))
+        FALSE
+      }
+    )
+    if (isTRUE(copied)) unlink(staging, force = TRUE)
+  }
+
+  final_error <- tryCatch(
+    {
+      .verify_written_raster(target, x)
+      NULL
+    },
+    error = function(e) conditionMessage(e)
+  )
+  if (!is.null(final_error)) {
+    if (file.exists(target)) unlink(target, force = TRUE)
+    restored <- .restore_raster_backup(backup, target)
+    backup_path <- backup
+    if (isTRUE(restored)) backup <- NULL
+    stop(
+      "Raster write failed during promotion or final verification. Logical path: ",
+      .format_output_path_info(logical_info), ". Resolved path: ",
+      .format_output_path_info(target_info), ". Promotion details: ",
+      paste(c(promotion_errors, final_error), collapse = "; "),
+      if (had_target) {
+        paste0(
+          ". Previous output restored=", restored,
+          if (!isTRUE(restored) && !is.null(backup_path)) {
+            paste0("; backup retained at '", backup_path, "'")
+          } else {
+            ""
+          }
+        )
+      } else "",
+      ".",
+      call. = FALSE
+    )
+  }
+
+  promoted <- TRUE
+  if (!is.null(backup) && file.exists(backup)) unlink(backup, force = TRUE)
+  backup <- NULL
+  invisible(target)
 }
 
 

@@ -1,7 +1,7 @@
 #--------------------------------------------
 #-------------- Load packages ---------------
 #--------------------------------------------
-packages <- c( "dplyr", "stringr", "here", "qs","CoordinateCleaner", "raster", 
+packages <- c( "dplyr", "stringr", "here", "qs", "digest", "CoordinateCleaner", "raster",
                "rnaturalearth", "rnaturalearthdata", "ggplot2","tidyterra", 
                "dismo", "sdm", "caret", "viridisLite", "kableExtra","future", 
                "future.apply","randomForest","earth", "progressr", "sf", "gbm", 
@@ -186,7 +186,8 @@ gc()
     #--------------------------------------------
     species <- names(split_df)[i]
     taxonkey<- unique(split_df[[i]]$acceptedTaxonKey)
-    speciesName <- sub("^(\\w+)\\s+(\\w+).*", "\\1_\\2", species)  # Extract first two words of species name
+    speciesName <- species_output_stem(species)
+    name_parts <- scientific_name_output_parts(species)
     speciesgroup<-unique(split_df[[i]]$Group)
     
     
@@ -225,8 +226,8 @@ gc()
     #-- Prepare filenames and titles for export --
     #---------------------------------------------
     #Prepare PDF title 
-    nameExtension<- if (grepl("^\\S+\\s+\\S+$", species)) "" else sub("^\\S+\\s+\\S+\\s+", "", species)
-    PDF_title<-bquote(italic(.(gsub("_", " ", speciesName))) ~ .(nameExtension) ~ "(" * .(taxonkey) * ")")
+    nameExtension <- name_parts$authorship
+    PDF_title<-bquote(italic(.(name_parts$taxon_label)) ~ .(nameExtension) ~ "(" * .(taxonkey) * ")")
     
     #Prepare current and future basefile
     basefile<-  paste0(speciesName,"_Climate_")
@@ -282,6 +283,10 @@ gc()
     # Check and create each folder if necessary
     lapply(folder_paths, function(folder){
       create_folder(folder$path, folder$name)
+      if (identical(basename(folder$path), "Rasters") ||
+          identical(basename(folder$path), "Interim")) {
+        validate_output_directory(folder$path)
+      }
     })
     
     
@@ -965,7 +970,7 @@ gc()
       
       #Store raster
       binary_file <- file.path (raster_folder, paste0(basefile,"current_binary",mtp_value,"pct.tif"))
-      terra::writeRaster(binary_map_pct, filename = binary_file, overwrite = TRUE)
+      write_raster_safely(binary_map_pct, filename = binary_file, overwrite = TRUE)
       
       # export as PDF and PNG with and without occurrences plotted 
       base_file <- paste0(basefile, "current_binary",mtp_value,"pct")
@@ -1072,16 +1077,16 @@ gc()
         
         # Export future ensemble raster (favorability) 
         ensemble_file <- file.path(future_folder, paste0(basefile, period,"_",scenario,"_ensemble.tif"))
-        terra::writeRaster(future_consensus_median, filename = ensemble_file, overwrite = TRUE)
+        write_raster_safely(future_consensus_median, filename = ensemble_file, overwrite = TRUE)
         
         # Export future mean raster 
         future_mean_folder <- file.path(base_dir, "Climate", "Current", "Interim")
         ensemble_mean_file <- file.path(future_mean_folder, paste0(basefile, period,"_",scenario,"_ensemble_mean.tif"))
-        terra::writeRaster(future_consensus_mean, filename = ensemble_mean_file, overwrite = TRUE)
+        write_raster_safely(future_consensus_mean, filename = ensemble_mean_file, overwrite = TRUE)
         
         # Export future sd raster 
         ensemble_sd_file <- file.path(future_sd_folder, paste0(basefile, period,"_",scenario,"_ensemble_SD.tif"))
-        terra::writeRaster(future_consensus_sd, filename = ensemble_sd_file, overwrite = TRUE)
+        write_raster_safely(future_consensus_sd, filename = ensemble_sd_file, overwrite = TRUE)
         
         # Export ensemble predictions as PDF and PNG with and without occurrences
         base_file <- paste0(basefile, scenario,"_", period,"_ensemble")
@@ -1136,7 +1141,7 @@ gc()
           #Store raster
           binary_file <- file.path(future_folder, 
                                    paste0(basefile, period,"_",scenario,"_binary",mtp_text,".tif"))
-          terra::writeRaster(binary_map_future, filename = binary_file, overwrite = TRUE)
+          write_raster_safely(binary_map_future, filename = binary_file, overwrite = TRUE)
           
           # Export binarized ensemble predictions as PDF and PNG with and without occurrences 
           base_file <- paste0(basefile, period,"_", scenario, "_binary",mtp_text)
@@ -1277,22 +1282,22 @@ gc()
     ensemble_sd_file <- file.path( base_dir,"Climate", "Current","Diagnostics", "Confidence_maps", "Rasters",
                                    paste0(basefile, "current_ensemble_SD.tif"))
     
-    terra::writeRaster(biasgrid_sub, filename = biasgrid_file, overwrite = TRUE)
+    write_raster_safely(biasgrid_sub, filename = biasgrid_file, overwrite = TRUE)
     
     
     #Export suitability predictions for europe (needed for mtp calculation in habitat script) and, if relevant, for country of interest
     if(tolower(country_of_interest)!="europe"||!is.null(custom_country_boundary_path)){
       europe_ensemble_median_file<- file.path( base_dir,"Climate", "Current", "Predictions", "Rasters",
                                                paste0(basefile, "current_ensemble_Europe.tif"))
-      terra::writeRaster(consensus_median_europe, filename = europe_ensemble_median_file, overwrite = TRUE)
-      terra::writeRaster(ensemble_suitability, filename = ensemble_median_file, overwrite = TRUE)
-      terra::writeRaster(ensemble_mean, filename = ensemble_mean_file, overwrite = TRUE)
-      terra::writeRaster(ensemble_sd, filename = ensemble_sd_file, overwrite = TRUE)
+      write_raster_safely(consensus_median_europe, filename = europe_ensemble_median_file, overwrite = TRUE)
+      write_raster_safely(ensemble_suitability, filename = ensemble_median_file, overwrite = TRUE)
+      write_raster_safely(ensemble_mean, filename = ensemble_mean_file, overwrite = TRUE)
+      write_raster_safely(ensemble_sd, filename = ensemble_sd_file, overwrite = TRUE)
       
     }else{
-      terra::writeRaster(ensemble_suitability, filename = ensemble_median_file, overwrite = TRUE)
-      terra::writeRaster(ensemble_mean, filename = ensemble_mean_file, overwrite = TRUE)
-      terra::writeRaster(ensemble_sd, filename = ensemble_sd_file, overwrite = TRUE)
+      write_raster_safely(ensemble_suitability, filename = ensemble_median_file, overwrite = TRUE)
+      write_raster_safely(ensemble_mean, filename = ensemble_mean_file, overwrite = TRUE)
+      write_raster_safely(ensemble_sd, filename = ensemble_sd_file, overwrite = TRUE)
     }
     
     
@@ -1308,7 +1313,12 @@ gc()
                               "climate_input_mode", "climate_manifest", "climate_manifest_path", "predictor_crs",
                               "predictor_sf_crs", "load_named_raster_stack", "create_pseudoabsence_template",
                               "load_user_specific_climate_manifest", "resolve_input_path",
-                              "kmeans_with_center_fallback")))
+                              "kmeans_with_center_fallback", "species_output_stem",
+                              "scientific_name_output_parts",
+                              "fortify_output_path", "validate_output_directory", "write_raster_safely",
+                              ".stable_output_digest", ".output_path_info", ".format_output_path_info",
+                              ".sanitize_output_filename", ".validate_portable_directory_components",
+                              ".verify_written_raster", ".restore_raster_backup")))
     
     #Clean terra tempfiles
     terra::tmpFiles(remove = TRUE)

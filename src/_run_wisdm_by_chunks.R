@@ -82,22 +82,29 @@
 # This runner intentionally leaves 00_configurations.R and scripts 01-05 unchanged.
 # It injects `project` and `species_to_model` before each stage is sourced.
 
+source(file.path("src", "helper_functions.R"))
+
 
 #-------------------------------------------------------------------------------
 # User settings
 #-------------------------------------------------------------------------------
 n_blocks <- 6
-nr_active_block <- 6
+nr_active_block <- 1
 project_prefix <- "onestop"
 
-species_list <- c(
-  letters[1:5],"Carpobrotus edulis"
-)
+# species_list <- c(
+#   letters[1:5],"Carpobrotus edulis"
+# )
+
+species_list <- make_species_list("Acridotheres cristatellus",
+                                  nr_active_block,
+                                  n_blocks)
+
 
 retry_failed <- TRUE
 retry_skipped <- FALSE
 verify_completed_outputs <- TRUE
-reuse_successful_stages <- FALSE
+reuse_successful_stages <- TRUE
 
 run_setup_01 <- TRUE
 force_setup_01 <- FALSE
@@ -689,7 +696,7 @@ make_chunk_assignments <- function(n_species, n_blocks) {
 }
 
 species_model_name <- function(species) {
-  sub("^(\\w+)\\s+(\\w+).*", "\\1_\\2", species)
+  species_output_stem(species)
 }
 
 read_taxa_metadata <- function(project) {
@@ -803,18 +810,18 @@ climate_core_paths <- function(taxa_info) {
     paths <- c(
       paths,
       file.path(base_dir, "Climate", paste0("Climate_model_", species_name, "_", taxon_key, ".qs")),
-      file.path(base_dir, "Climate", "Current", "Predictions", "Rasters", paste0(base_file, "current_ensemble.tif")),
-      file.path(base_dir, "Climate", "Current", "Interim", paste0(base_file, "current_ensemble_mean.tif")),
-      file.path(base_dir, "Climate", "Current", "Diagnostics", "Confidence_maps", "Rasters", paste0(base_file, "current_ensemble_SD.tif"))
+      fortify_output_path(file.path(base_dir, "Climate", "Current", "Predictions", "Rasters", paste0(base_file, "current_ensemble.tif"))),
+      fortify_output_path(file.path(base_dir, "Climate", "Current", "Interim", paste0(base_file, "current_ensemble_mean.tif"))),
+      fortify_output_path(file.path(base_dir, "Climate", "Current", "Diagnostics", "Confidence_maps", "Rasters", paste0(base_file, "current_ensemble_SD.tif")))
     )
 
     for (period in c("2041-2070", "2071-2100")) {
       for (scenario in c("ssp126", "ssp370", "ssp585")) {
         paths <- c(
           paths,
-          file.path(base_dir, "Climate", period, scenario, "Predictions", "Rasters", paste0(base_file, period, "_", scenario, "_ensemble.tif")),
-          file.path(base_dir, "Climate", "Current", "Interim", paste0(base_file, period, "_", scenario, "_ensemble_mean.tif")),
-          file.path(base_dir, "Climate", period, scenario, "Diagnostics", "Confidence_maps", "Rasters", paste0(base_file, period, "_", scenario, "_ensemble_SD.tif"))
+          fortify_output_path(file.path(base_dir, "Climate", period, scenario, "Predictions", "Rasters", paste0(base_file, period, "_", scenario, "_ensemble.tif"))),
+          fortify_output_path(file.path(base_dir, "Climate", "Current", "Interim", paste0(base_file, period, "_", scenario, "_ensemble_mean.tif"))),
+          fortify_output_path(file.path(base_dir, "Climate", period, scenario, "Diagnostics", "Confidence_maps", "Rasters", paste0(base_file, period, "_", scenario, "_ensemble_SD.tif")))
         )
       }
     }
