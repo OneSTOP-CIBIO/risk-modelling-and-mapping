@@ -353,12 +353,32 @@ predict_future_habitat_ensemble <- function(model,
     #----- Create subset of European records -------
     #-----------------------------------------------
     #Check for occurrences that fall within Europe
-    eu_occ <- global.occ.sf%>%
+    eu_occ_sf <- global.occ.sf%>%
       st_transform(crs = st_crs(habitat_stack)) %>%
-      sf::st_filter(euboundary) %>%
+      sf::st_filter(euboundary)
+    eu_occ_count <- nrow(eu_occ_sf)
+    rm(global.occ.sf)
+    gc()
+
+    # An empty sf object has no X/Y coordinate columns. Stop the habitat branch
+    # before coordinate processing so the runner can continue with climate-only
+    # cross-validation in stage 05.
+    if (eu_occ_count == 0L) {
+      warning(
+        paste0(
+          "Stage 04 habitat model skipped for ", species,
+          ": 0 occurrence records intersect Europe. ",
+          "Stage 05 can continue with climate-only validation."
+        ),
+        call. = FALSE
+      )
+      next
+    }
+
+    eu_occ <- eu_occ_sf %>%
       sf::st_coordinates() %>%
       as.data.frame()
-    rm(global.occ.sf)
+    rm(eu_occ_sf, eu_occ_count)
     gc()
     
     
@@ -445,8 +465,16 @@ predict_future_habitat_ensemble <- function(model,
     #----- Check if at least 20 European records ----
     #------------------------------------------------
     if (nrow(eu_occ) < 20) {
-      warning(paste(nrow(eu_occ)," occurrences in Europe for species:", species, 
-                    "\n- European model cannot be constructed, skipping to the next species."))
+      warning(
+        paste0(
+          "Stage 04 habitat model skipped for ", species, ": only ",
+          nrow(eu_occ),
+          " usable occurrence record(s) remain in Europe after deduplication ",
+          "and no-data filtering; at least 20 are required. ",
+          "Stage 05 can continue with climate-only validation."
+        ),
+        call. = FALSE
+      )
       next  # Skip to the next species in the loop
     }
     

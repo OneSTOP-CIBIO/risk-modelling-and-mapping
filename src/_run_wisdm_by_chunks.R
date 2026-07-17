@@ -82,21 +82,36 @@
 # This runner intentionally leaves 00_configurations.R and scripts 01-05 unchanged.
 # It injects `project` and `species_to_model` before each stage is sourced.
 
-source(file.path("src", "helper_functions.R"))
-
+source("./src/helper_functions.R")
 
 #-------------------------------------------------------------------------------
 # User settings
 #-------------------------------------------------------------------------------
 n_blocks <- 6
-nr_active_block <- 1
 project_prefix <- "onestop"
 
-# species_list <- c(
-#   letters[1:5],"Carpobrotus edulis"
-# )
+# nr_active_block <- 1
+# species_list <- make_species_list("Acridotheres cristatellus",
+#                                   nr_active_block,
+#                                   n_blocks)
+#
+# nr_active_block <- 1
+# species_list <- make_species_list("Callosciurus finlaysonii",
+#                                   nr_active_block,
+#                                   n_blocks)
+#
+# nr_active_block <- 3
+# species_list <- make_species_list("Pycnonotus jocosus",
+#                                   nr_active_block,
+#                                   n_blocks)
+#
+# nr_active_block <- 5
+# species_list <- make_species_list("Agrilus planipennis",
+#                                   nr_active_block,
+#                                   n_blocks)
 
-species_list <- make_species_list("Acridotheres cristatellus",
+nr_active_block <- 3
+species_list <- make_species_list("Reynoutria × bohemica",
                                   nr_active_block,
                                   n_blocks)
 
@@ -346,6 +361,12 @@ stage_labels <- c(
   "03" = "fit_climate_model",
   "04" = "fit_habitat_model",
   "05" = "cross_validation"
+)
+
+stage_04_climate_only_event_token <- "stage 05 will run climate validation only"
+stage_04_climate_only_reason <- paste0(
+  "Stage 04 completed without creating a habitat model file; ",
+  stage_04_climate_only_event_token, "."
 )
 
 registry_columns <- c(
@@ -898,15 +919,20 @@ stage_has_success_event <- function(stage_event) {
   !is.null(stage_event) && stage_event$state[[1]] %in% c("OK", "REUSE")
 }
 
-stage_has_climate_only_skip_event <- function(stage_event) {
-  !is.null(stage_event) &&
-    identical(stage_event$stage[[1]], "04") &&
-    identical(stage_event$state[[1]], "SKIP") &&
-    isTRUE(grepl(
-      "no habitat model file; stage 05 will run climate validation only",
-      stage_event$message[[1]],
-      fixed = TRUE
-    ))
+stage_has_climate_only_event <- function(stage_event) {
+  if (is.null(stage_event) ||
+      !identical(stage_event$stage[[1]], "04") ||
+      !stage_event$state[[1]] %in% c("SKIP", "REUSE")) {
+    return(FALSE)
+  }
+
+  event_message <- tolower(as.character(stage_event$message[[1]]))
+  if (is.na(event_message) || !nzchar(event_message)) {
+    return(FALSE)
+  }
+
+  grepl(stage_04_climate_only_event_token, event_message, fixed = TRUE) ||
+    grepl("stage 04 climate-only decision", event_message, fixed = TRUE)
 }
 
 can_reuse_stage <- function(stage_id, species_row, attempt) {
@@ -919,11 +945,14 @@ can_reuse_stage <- function(stage_id, species_row, attempt) {
 
   stage_event <- latest_stage_event(species_row$species_key[[1]], stage_id)
   if (identical(stage_id, "04") &&
-      stage_has_climate_only_skip_event(stage_event) &&
+      stage_has_climate_only_event(stage_event) &&
       stage_04_climate_only_ready(species_row$project[[1]])) {
     return(list(
       reuse = TRUE,
-      reason = "Reusing previous stage 04 climate-only decision; no habitat model file exists.",
+      reason = paste0(
+        "Reusing previous stage 04 climate-only decision; no habitat model file exists; ",
+        stage_04_climate_only_event_token, "."
+      ),
       mode = "climate_only"
     ))
   }
@@ -1242,7 +1271,7 @@ handle_successful_stage_outputs <- function(species_row,
         return(TRUE)
       }
 
-      reason <- "Stage 04 finished without creating a habitat model file; stage 05 will run climate validation only."
+      reason <- stage_04_climate_only_reason
       append_event(
         species_requested = species_row$species_requested,
         species_key = species_row$species_key,

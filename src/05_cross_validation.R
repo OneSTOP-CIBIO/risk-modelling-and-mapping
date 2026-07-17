@@ -960,6 +960,13 @@ for (i in seq_along(accepted_taxonkeys)) {
   habitat_model_artifact <- NULL
   habitat_selection <- NULL
   habitat_methods <- character(0)
+  if (!has_habitat) {
+    message(
+      "No habitat model was found for ", species,
+      "; continuing with climate-only validation. ",
+      "Habitat and combined validation will be skipped."
+    )
+  }
   if (has_habitat) {
     habitat_model_artifact <- qs::qread(habitat_qs_file)
     habitat_predictors <- habitat_model_artifact$selected_predictors
@@ -1066,6 +1073,25 @@ for (i in seq_along(accepted_taxonkeys)) {
   validate_climate_europe <- all(
     eu_climate_counts >= 2L * minimum_test_class_records
   )
+  eu_climate_not_evaluable_reason <- NA_character_
+  if (!validate_climate_europe) {
+    eu_absence_count <- unname(eu_climate_counts[["0"]])
+    eu_presence_count <- unname(eu_climate_counts[["1"]])
+    eu_climate_not_evaluable_reason <- if (eu_presence_count == 0L) {
+      paste0(
+        "European climate validation is not evaluable because zero usable ",
+        "presence records intersect Europe. Usable counts: absence=",
+        eu_absence_count, ", presence=0."
+      )
+    } else {
+      paste0(
+        "European climate validation requires enough records of both classes ",
+        "for at least two folds. Usable counts: absence=", eu_absence_count,
+        ", presence=", eu_presence_count, "."
+      )
+    }
+    message(eu_climate_not_evaluable_reason)
+  }
 
   # Global Boyce background restricted to occupied biomes.
   biome <- sf::st_read(biome_path, quiet = TRUE) %>%
@@ -1183,13 +1209,11 @@ for (i in seq_along(accepted_taxonkeys)) {
         climate_run$result$eu_metrics, climate_run$plan
       )
     } else {
-      reason <- paste0(
-        "European climate validation requires enough records of both classes for at least two folds. ",
-        "Usable counts: absence=", eu_climate_counts[["0"]],
-        ", presence=", eu_climate_counts[["1"]], "."
-      )
       eu_climate_metrics <- not_evaluable_metrics(
-        speciesName, "Climate", "Europe", not_evaluable_plan(reason)
+        speciesName,
+        "Climate",
+        "Europe",
+        not_evaluable_plan(eu_climate_not_evaluable_reason)
       )
     }
   } else {
@@ -1197,8 +1221,13 @@ for (i in seq_along(accepted_taxonkeys)) {
     global_climate_metrics <- not_evaluable_metrics(
       speciesName, "Climate", "Global", failed_plan
     )
+    eu_failed_plan <- if (validate_climate_europe) {
+      failed_plan
+    } else {
+      not_evaluable_plan(eu_climate_not_evaluable_reason)
+    }
     eu_climate_metrics <- not_evaluable_metrics(
-      speciesName, "Climate", "Europe", failed_plan
+      speciesName, "Climate", "Europe", eu_failed_plan
     )
   }
 

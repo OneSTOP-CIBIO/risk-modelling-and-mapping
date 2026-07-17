@@ -197,6 +197,30 @@ run_test("missing context classes are rejected before partitioning", {
               "The missing context/class was not diagnosed.")
 })
 
+run_test("European climate context with zero presences is not evaluable", {
+  records <- data.frame(
+    species = c(rep(0:1, each = 10L), rep(0L, 10L)),
+    cv_context = c(rep("global", 20L), rep("eu_climate", 10L)),
+    cv_stratum = c(
+      rep(c("global_0", "global_1"), each = 10L),
+      rep("eu_climate_0", 10L)
+    ),
+    cv_group = seq_len(30L)
+  )
+  plan <- make_stratified_kfold_plan(
+    records,
+    requested_folds = 5L,
+    min_train = 2L,
+    min_test = 2L,
+    iteration = 20L
+  )
+  assert_true(!plan$valid, "A European context with zero presences was accepted.")
+  assert_true(identical(plan$method, "not_evaluable"),
+              "The zero-presence context was not labelled not_evaluable.")
+  assert_true(grepl("eu_climate class 1", plan$fallback_reason, fixed = TRUE),
+              "The missing European presence class was not diagnosed.")
+})
+
 run_test("grouped duplicate records remain in one fold", {
   records <- as.data.frame(make_spatial_records(24L))
   records <- rbind(records, records[c(1L, 25L), , drop = FALSE])
