@@ -931,27 +931,47 @@ gc()
     # Get predictor values at occurrence points
     predictors_only <- global.data.df.uncor%>%
       dplyr::filter(species=="present")%>%
-      dplyr::select(-species)
-    
-    # Predict for top 5 models
-    pred_vals <- list()
-    for (method in top5_models) {
-      pred_vals[[method]] <- predict(model, newdata = predictors_only, method = tolower(method))
+      dplyr::select(-species)%>%
+      dplyr::mutate(ID = dplyr::row_number(), .before = 1)
+
+    mtp_prediction <- compute_median_favourability_safe(
+      model = model,
+      datasets = list(occurrences = predictors_only),
+      top5_methods = top5_models,
+      prev_ratio = prev_ratio,
+      min_successful_methods = 3L
+    )
+    mtp_prediction_diagnostics <- mtp_prediction$method_diagnostics
+    failed_mtp_predictions <- mtp_prediction_diagnostics %>%
+      dplyr::filter(!success)
+    if (nrow(failed_mtp_predictions) > 0L) {
+      for (diagnostic_row in seq_len(nrow(failed_mtp_predictions))) {
+        message(
+          "Skipping climate MTP prediction for method '",
+          failed_mtp_predictions$method[[diagnostic_row]],
+          "': ",
+          failed_mtp_predictions$error[[diagnostic_row]]
+        )
+      }
     }
-    
-    # Favourability transformation
-    fav_vals <- lapply(pred_vals, function(p) favourability_from_prob(p[[1]], prev_ratio))
-    
-    #Create one df with the median favorability value for each occurrence
-    fav_vals <- fav_vals %>%
-      do.call(cbind, .) %>%
-      as.data.frame() %>%
-      dplyr::mutate(median = apply(., 1, median, na.rm = TRUE)) %>% #1 = apply to rows
-      dplyr::select(median)
+
+    fav_vals <- if (isTRUE(mtp_prediction$valid)) {
+      mtp_prediction$median_favourability$occurrences %>%
+        dplyr::transmute(median = median_favourability)
+    } else {
+      message(
+        "Skipping climate MTP binary products: only ",
+        mtp_prediction$success_count,
+        " of ", length(top5_models),
+        " selected algorithms produced valid occurrence predictions; at least 3 are required."
+      )
+      NULL
+    }
     
     # Create binary maps
     binary_maps<-list()
-    for (probs in mtp_probabilities){
+    if (isTRUE(mtp_prediction$valid)) {
+      for (probs in mtp_probabilities){
       
       #Define mtp_pct and mtp_value
       mtp_value <- probs*100
@@ -995,6 +1015,7 @@ gc()
       binary_maps[[mtp_pct]] <- list(binary_raster=binary_map_pct,
                                      mean_MTP= thr)
       rm(binary_map_pct, binary_file, mtp_value, mtp_pct, to_omit, thr)
+      }
     }
     
     
@@ -1133,6 +1154,14 @@ gc()
           
           #Get threshold value and apply to consensus predictions
           threshold<-climate_thresholds[[mtp_label]]
+          if (is.null(threshold) || length(threshold) != 1L ||
+              !is.numeric(threshold) || !is.finite(threshold)) {
+            message(
+              "Skipping future climate binary product for ", period, "/", scenario,
+              " at ", mtp_label, ": no valid current MTP threshold is available."
+            )
+            next
+          }
           binary_map_future <- future_consensus_median  >= threshold
           binary_map_future <- as.factor( binary_map_future*1) #Convert TRUE/FALSE to 1/0 and then to Present/Absent
           levels( binary_map_future) <- data.frame(ID = c(0, 1),
@@ -1173,70 +1202,70 @@ gc()
     #-----------------------------------------------
     #- Get response curves and variable importance -
     #-----------------------------------------------
-    response_list<-list()
-    varimp_list<-list()
-    
-    for(topmethod in top5_models){
-      # Get model id
-      id <- info$modelID[info$method == topmethod]
-      
-      #Get response curve
-      response_curves<-sdm::getResponseCurve(model,id)@response
-      
-      #Get variable importance
-      varimp<-sdm::getVarImp(model,id)@varImportance
-      
-      #Store
-      response_list[[topmethod]]<-response_curves
-      varimp_list[[topmethod]]<-varimp
-    }
-    
-    # Convert list to a dataframe
-    response_df <- purrr::imap_dfr(response_list, function(model_list, model_name) {
-      purrr::imap_dfr(model_list, function(df, var_name) {
-        response_df <- df %>%
-          setNames(c("Predictor_value", "Response"))%>%
-          mutate( Algorithm = model_name,
-                  Predictor = var_name)})
-    }) %>%
-      dplyr::select(Algorithm,Predictor, Predictor_value, Response)
-    
-    
-    varimp_df <- purrr::imap_dfr(varimp_list, function(df, model_name) {
-      df %>%
-        setNames(c("Predictor", "corTest" , "AUCtest"))%>%
-        dplyr::mutate(Algorithm = model_name)
-    })%>%
-      dplyr::select(Algorithm,Predictor, corTest, AUCtest)
-    
-    
-    # Plot response curves
-    response_plot <- ggplot(response_df, aes(x = Predictor_value,
-                                             y = Response, 
-                                             color = Algorithm)) +
-      geom_line(linewidth=0.8) +
-      facet_wrap(~ Predictor, scales = "free_x")+
-      labs(title= "Climatological response curves" ,x= "Predictor value")+
-      theme_bw()
-    
-    # Plot variable importance 
-    varimp_plot <- ggplot(varimp_df, aes(x = Predictor, y = corTest)) +
-      geom_col(fill = "steelblue") +
-      coord_flip() +  #horizontal bars
-      facet_wrap(~ Algorithm) +  
-      geom_hline(yintercept = 0, color = "black") + 
-      labs(
-        x = "Variable",
-        y = "Importance",
-        title = "Variable importance per model"
-      ) +
-      theme_bw()
-    
-    #Save plot
+    explainability <- collect_sdm_explainability(
+      model = model,
+      methods = top5_models,
+      model_info = info
+    )
+    response_df <- explainability$response_df
+    varimp_df <- explainability$varimp_df
+    explainability_diagnostics <- explainability$diagnostics
+
+    # Save plots only when usable diagnostic rows exist
     PNG_folder <- file.path(base_dir, "Climate", "Current", "Diagnostics")
-    
-    ggplot2::ggsave(filename = paste(basefile, "variable_importance.png"), plot = varimp_plot ,  device = "png", width =8.27 , height = 5.845, path= file.path(PNG_folder, "Variable_importance") )
-    ggplot2::ggsave(filename = paste(basefile, "response_curves.png"), plot = response_plot,  device = "png", width =8.27 , height = 5.845, path=  file.path(PNG_folder, "Response_curves") )
+    response_filename <- paste(basefile, "response_curves.png")
+    response_path <- file.path(PNG_folder, "Response_curves")
+    response_file <- file.path(response_path, response_filename)
+    if (nrow(response_df) > 0L) {
+      response_plot <- ggplot(response_df, aes(x = Predictor_value,
+                                               y = Response,
+                                               color = Algorithm)) +
+        geom_line(linewidth=0.8) +
+        facet_wrap(~ Predictor, scales = "free_x")+
+        labs(title= "Climatological response curves" ,x= "Predictor value")+
+        theme_bw()
+      ggplot2::ggsave(
+        filename = response_filename,
+        plot = response_plot,
+        device = "png",
+        width = 8.27,
+        height = 5.845,
+        path = response_path
+      )
+    } else {
+      if (file.exists(response_file)) unlink(response_file)
+      message("No usable climate response curves were available; the response plot was omitted.")
+    }
+
+    varimp_plot_df <- varimp_df %>%
+      dplyr::filter(is.finite(corTest))
+    varimp_filename <- paste(basefile, "variable_importance.png")
+    varimp_path <- file.path(PNG_folder, "Variable_importance")
+    varimp_file <- file.path(varimp_path, varimp_filename)
+    if (nrow(varimp_plot_df) > 0L) {
+      varimp_plot <- ggplot(varimp_plot_df, aes(x = Predictor, y = corTest)) +
+        geom_col(fill = "steelblue") +
+        coord_flip() +
+        facet_wrap(~ Algorithm) +
+        geom_hline(yintercept = 0, color = "black") +
+        labs(
+          x = "Variable",
+          y = "Importance",
+          title = "Variable importance per model"
+        ) +
+        theme_bw()
+      ggplot2::ggsave(
+        filename = varimp_filename,
+        plot = varimp_plot,
+        device = "png",
+        width = 8.27,
+        height = 5.845,
+        path = varimp_path
+      )
+    } else {
+      if (file.exists(varimp_file)) unlink(varimp_file)
+      message("No usable climate variable importance values were available; the importance plot was omitted.")
+    }
     
     
     #--------------------------------------------
@@ -1255,6 +1284,8 @@ gc()
                         top5_models = top5_models,
                         response_df = response_df,
                         varimp_df = varimp_df,
+                        explainability_diagnostics = explainability_diagnostics,
+                        mtp_prediction_diagnostics = mtp_prediction_diagnostics,
                         top5models = top5models,
                         selected_predictors = selected_predictor_names,
                         future_consensus_median = future_consensus_median,
@@ -1313,9 +1344,10 @@ gc()
                               "climate_input_mode", "climate_manifest", "climate_manifest_path", "predictor_crs",
                               "predictor_sf_crs", "load_named_raster_stack", "create_pseudoabsence_template",
                               "load_user_specific_climate_manifest", "resolve_input_path",
-                              "kmeans_with_center_fallback", "species_output_stem",
-                              "scientific_name_output_parts",
-                              "fortify_output_path", "validate_output_directory", "write_raster_safely",
+                               "kmeans_with_center_fallback", "species_output_stem",
+                               "scientific_name_output_parts",
+                               "compute_median_favourability_safe", "collect_sdm_explainability",
+                               "fortify_output_path", "validate_output_directory", "write_raster_safely",
                               ".stable_output_digest", ".output_path_info", ".format_output_path_info",
                               ".sanitize_output_filename", ".validate_portable_directory_components",
                               ".verify_written_raster", ".restore_raster_backup")))

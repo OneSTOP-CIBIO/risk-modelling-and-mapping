@@ -2563,6 +2563,295 @@ make_preferred_cv_plan <- function(records,
 }
 
 
+#-----------------------------------------------------------------------
+#- Collect response curves and variable importance without stage aborts -
+#-----------------------------------------------------------------------
+
+collect_sdm_explainability <- function(model,
+                                       methods,
+                                       model_info = NULL,
+                                       response_getter = NULL,
+                                       importance_getter = NULL) {
+  empty_response <- data.frame(
+    Algorithm = character(0),
+    Predictor = character(0),
+    Predictor_value = numeric(0),
+    Response = numeric(0),
+    stringsAsFactors = FALSE
+  )
+  empty_varimp <- data.frame(
+    Algorithm = character(0),
+    Predictor = character(0),
+    corTest = numeric(0),
+    AUCtest = numeric(0),
+    stringsAsFactors = FALSE
+  )
+  empty_diagnostics <- data.frame(
+    Algorithm = character(0),
+    ModelID = integer(0),
+    Diagnostic = character(0),
+    Success = logical(0),
+    Reason = character(0),
+    stringsAsFactors = FALSE
+  )
+
+  methods <- unique(as.character(methods))
+  methods <- methods[!is.na(methods) & nzchar(methods)]
+  if (length(methods) == 0L) {
+    return(list(
+      response_df = empty_response,
+      varimp_df = empty_varimp,
+      diagnostics = empty_diagnostics
+    ))
+  }
+
+  if (is.null(model_info)) {
+    model_info <- sdm::getModelInfo(model)
+  }
+  required_info_columns <- c("modelID", "method", "success")
+  missing_info_columns <- setdiff(required_info_columns, names(model_info))
+  if (length(missing_info_columns) > 0L) {
+    stop(
+      "SDM model information is missing required column(s): ",
+      paste(missing_info_columns, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  if (is.null(response_getter)) {
+    response_getter <- sdm::getResponseCurve
+  }
+  if (is.null(importance_getter)) {
+    importance_getter <- sdm::getVarImp
+  }
+  if (!is.function(response_getter) || !is.function(importance_getter)) {
+    stop("SDM diagnostic accessors must be functions.", call. = FALSE)
+  }
+
+  info_methods <- as.character(model_info$method)
+  successful_rows <- !is.na(model_info$success) & model_info$success
+  response_rows <- list()
+  varimp_rows <- list()
+  diagnostic_rows <- list()
+  response_index <- 0L
+  varimp_index <- 0L
+  diagnostic_index <- 0L
+
+  add_diagnostic <- function(algorithm, model_id, diagnostic, success, reason = NA_character_) {
+    diagnostic_index <<- diagnostic_index + 1L
+    diagnostic_rows[[diagnostic_index]] <<- data.frame(
+      Algorithm = algorithm,
+      ModelID = as.integer(model_id),
+      Diagnostic = diagnostic,
+      Success = isTRUE(success),
+      Reason = if (isTRUE(success)) NA_character_ else as.character(reason),
+      stringsAsFactors = FALSE
+    )
+    if (!isTRUE(success)) {
+      id_label <- if (length(model_id) == 0L || is.na(model_id)) "<none>" else as.character(model_id)
+      message(
+        "Skipping ", diagnostic, " for method '", algorithm,
+        "' (model ID ", id_label, "): ", reason
+      )
+    }
+  }
+
+  failure_reason <- function(result, expected_slot) {
+    if (inherits(result, "error")) {
+      return(conditionMessage(result))
+    }
+    if (is.null(result)) {
+      return("the SDM accessor returned NULL")
+    }
+    if (!isS4(result)) {
+      return("the SDM accessor returned a non-S4 object")
+    }
+    if (!expected_slot %in% methods::slotNames(result)) {
+      return(paste0("the returned object has no '", expected_slot, "' slot"))
+    }
+    NULL
+  }
+
+  for (algorithm in methods) {
+    model_ids <- model_info$modelID[successful_rows & info_methods == algorithm]
+    model_ids <- unique(model_ids[!is.na(model_ids)])
+
+    if (length(model_ids) == 0L) {
+      reason <- "no successfully fitted model ID is available"
+      add_diagnostic(algorithm, NA_integer_, "response_curve", FALSE, reason)
+      add_diagnostic(algorithm, NA_integer_, "variable_importance", FALSE, reason)
+      next
+    }
+
+    for (model_id in model_ids) {
+      response_result <- tryCatch(
+        response_getter(model, model_id),
+        error = function(e) e
+      )
+      response_failure <- failure_reason(response_result, "response")
+
+      if (is.null(response_failure)) {
+        response_list <- methods::slot(response_result, "response")
+        if (!is.list(response_list) || length(response_list) == 0L) {
+          response_failure <- "the response slot is empty"
+        } else {
+          valid_response_count <- 0L
+          response_names <- names(response_list)
+          if (is.null(response_names)) {
+            response_names <- rep("", length(response_list))
+          }
+
+          for (response_position in seq_along(response_list)) {
+            curve <- response_list[[response_position]]
+            curve <- tryCatch(as.data.frame(curve), error = function(e) NULL)
+            if (is.null(curve) || ncol(curve) < 2L || nrow(curve) == 0L) {
+              next
+            }
+
+            predictor_name <- response_names[[response_position]]
+            if (is.na(predictor_name) || !nzchar(predictor_name)) {
+              predictor_name <- names(curve)[[1]]
+            }
+            predictor_values <- tryCatch(
+              suppressWarnings(as.numeric(as.character(curve[[1]]))),
+              error = function(e) NULL
+            )
+            response_values <- tryCatch(
+              suppressWarnings(as.numeric(as.character(curve[[2]]))),
+              error = function(e) NULL
+            )
+            if (is.null(predictor_values) || is.null(response_values)) {
+              next
+            }
+            usable <- is.finite(predictor_values) & is.finite(response_values)
+            if (!any(usable)) {
+              next
+            }
+
+            response_index <- response_index + 1L
+            valid_response_count <- valid_response_count + 1L
+            response_rows[[response_index]] <- data.frame(
+              Algorithm = algorithm,
+              ModelID = as.integer(model_id),
+              Predictor = as.character(predictor_name),
+              Predictor_value = predictor_values[usable],
+              Response = response_values[usable],
+              stringsAsFactors = FALSE
+            )
+          }
+
+          if (valid_response_count == 0L) {
+            response_failure <- "the response curves contain no finite predictor/response pairs"
+          }
+        }
+      }
+      add_diagnostic(
+        algorithm,
+        model_id,
+        "response_curve",
+        is.null(response_failure),
+        response_failure
+      )
+
+      importance_result <- tryCatch(
+        importance_getter(model, model_id),
+        error = function(e) e
+      )
+      importance_failure <- failure_reason(importance_result, "varImportance")
+
+      if (is.null(importance_failure)) {
+        importance <- methods::slot(importance_result, "varImportance")
+        expected_importance_columns <- c("variables", "corTest", "AUCtest")
+        if (!is.data.frame(importance) ||
+            !all(expected_importance_columns %in% names(importance)) ||
+            nrow(importance) == 0L) {
+          importance_failure <- paste0(
+            "the variable-importance table is empty or lacks columns: ",
+            paste(expected_importance_columns, collapse = ", ")
+          )
+        } else {
+          predictors <- as.character(importance$variables)
+          metric_values <- tryCatch(
+            list(
+              cor_test = suppressWarnings(as.numeric(as.character(importance$corTest))),
+              auc_test = suppressWarnings(as.numeric(as.character(importance$AUCtest)))
+            ),
+            error = function(e) NULL
+          )
+
+          if (is.null(metric_values)) {
+            importance_failure <- "the variable-importance metrics are not numeric"
+          } else {
+            cor_test <- metric_values$cor_test
+            auc_test <- metric_values$auc_test
+            usable <- !is.na(predictors) & nzchar(predictors) &
+              (is.finite(cor_test) | is.finite(auc_test))
+          }
+
+          if (is.null(importance_failure) && !any(usable)) {
+            importance_failure <- "the variable-importance table contains no finite metrics"
+          } else if (is.null(importance_failure)) {
+            varimp_index <- varimp_index + 1L
+            varimp_rows[[varimp_index]] <- data.frame(
+              Algorithm = algorithm,
+              ModelID = as.integer(model_id),
+              Predictor = predictors[usable],
+              corTest = cor_test[usable],
+              AUCtest = auc_test[usable],
+              stringsAsFactors = FALSE
+            )
+          }
+        }
+      }
+      add_diagnostic(
+        algorithm,
+        model_id,
+        "variable_importance",
+        is.null(importance_failure),
+        importance_failure
+      )
+    }
+  }
+
+  response_df <- if (length(response_rows) == 0L) {
+    empty_response
+  } else {
+    dplyr::bind_rows(response_rows) %>%
+      dplyr::group_by(Algorithm, Predictor, Predictor_value) %>%
+      dplyr::summarise(Response = mean(Response, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::select(Algorithm, Predictor, Predictor_value, Response) %>%
+      as.data.frame(stringsAsFactors = FALSE)
+  }
+
+  finite_mean <- function(values) {
+    values <- values[is.finite(values)]
+    if (length(values) == 0L) NA_real_ else mean(values)
+  }
+  varimp_df <- if (length(varimp_rows) == 0L) {
+    empty_varimp
+  } else {
+    dplyr::bind_rows(varimp_rows) %>%
+      dplyr::group_by(Algorithm, Predictor) %>%
+      dplyr::summarise(
+        corTest = finite_mean(corTest),
+        AUCtest = finite_mean(AUCtest),
+        .groups = "drop"
+      ) %>%
+      dplyr::select(Algorithm, Predictor, corTest, AUCtest) %>%
+      as.data.frame(stringsAsFactors = FALSE)
+  }
+
+  list(
+    response_df = response_df,
+    varimp_df = varimp_df,
+    diagnostics = if (length(diagnostic_rows) == 0L) {
+      empty_diagnostics
+    } else {
+      dplyr::bind_rows(diagnostic_rows)
+    }
+  )
+}
+
+
 #----------------------------------------------------------------------
 #- Make predictions per model algorithm and dataset and obtain median -
 #----------------------------------------------------------------------
