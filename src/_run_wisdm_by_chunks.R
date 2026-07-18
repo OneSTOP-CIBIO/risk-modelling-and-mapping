@@ -109,11 +109,57 @@ project_prefix <- "onestop"
 # species_list <- make_species_list("Agrilus planipennis",
 #                                   nr_active_block,
 #                                   n_blocks)
+# 
+# nr_active_block <- 3
+# species_list <- make_species_list("Reynoutria × bohemica",
+#                                   nr_active_block,
+#                                   n_blocks)
+#
+##################################################################
+#
+#
+# nr_active_block <- 4
+# species_list <- make_species_list("Apis florea",
+#                                   nr_active_block,
+#                                   n_blocks)
 
-nr_active_block <- 3
-species_list <- make_species_list("Reynoutria × bohemica",
+# nr_active_block <- 2
+# species_list <- make_species_list("Lespedeza cuneata",
+#                                   nr_active_block,
+#                                   n_blocks)
+# 
+# nr_active_block <- 3
+# species_list <- make_species_list("Solenopsis geminata",
+#                                   nr_active_block,
+#                                   n_blocks)
+# 
+# nr_active_block <- 4
+# species_list <- make_species_list("Solenopsis richteri",
+#                                   nr_active_block,
+#                                   n_blocks)
+# 
+nr_active_block <- 4
+species_list <- make_species_list("Vespa mandarinia",
                                   nr_active_block,
                                   n_blocks)
+#
+#
+##################################################################
+
+# nr_active_block <- 2
+# species_list <- make_species_list("Humulus scandens",
+#                                   nr_active_block,
+#                                   n_blocks)
+
+nr_active_block <- 3
+species_list <- make_species_list("Persicaria perfoliata",
+                                  nr_active_block,
+                                  n_blocks)
+
+
+#
+#
+##################################################################
 
 
 retry_failed <- TRUE
