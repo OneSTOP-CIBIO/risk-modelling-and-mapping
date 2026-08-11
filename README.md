@@ -93,7 +93,7 @@ Davis AJS, Groom Q, Adriaens T, Vanderhoeven S, De Troch R, Oldoni D, Desmet P, 
 ![](img/OneSTOP_logo_resize_w200.png)     
 
     
-# Adaptations to the wiSDM 2.0 framework under OneSTOP Task 5.1
+# Adaptations of the wiSDM 2.0 framework for OneSTOP Task 5.1
 
 ## Summary
 
