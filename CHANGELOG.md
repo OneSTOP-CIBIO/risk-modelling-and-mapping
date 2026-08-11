@@ -13,6 +13,8 @@ No changes yet.
 
 Git tag: `onestop-v2.1.0`.
 
+Zenodo archive: [10.5281/zenodo.21880434](https://doi.org/10.5281/zenodo.21880434)
+
 ### Added
 
 - Manifest-driven support for user-supplied climate and land-cover raster

@@ -13,6 +13,9 @@ authors:
 repository-code: "https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping"
 url: "https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping"
 license: MIT
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.21880434"
 abstract: >-
   OneSTOP Task 5.1 adaptation of the TrIAS wiSDM 2.0 workflow for modelling
   and mapping invasive alien species in Europe. The adaptation retains the

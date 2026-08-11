@@ -3,6 +3,8 @@
 
 This repository contains the framework and R code for predicting the distribution of alien species in Europe at 1 km<sup>2</sup> (climate model) and 1 km<sup>2</sup> resolution (habitat/land cover model) as part of the TrIAS project and **later adapted to the OneSTOP Task 5.1 modelling requirements**.    
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21880433.svg)](https://doi.org/10.5281/zenodo.21880433)
+
 More specifically, this is the OneSTOP downstream adaptation of TrIAS Alien species risk modelling and mapping, wiSDM v2.0.0:
 
 - Upstream repository: https://github.com/trias-project/risk-modelling-and-mapping
