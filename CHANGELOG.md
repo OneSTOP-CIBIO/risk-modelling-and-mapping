@@ -9,9 +9,9 @@ development base is commit `2c7bc8712304e46bebd1bbcf2f90771c4814f865`.
 
 No changes yet.
 
-## [2.1.0] - Forthcoming
+## [2.1.0] - 2026/08/11
 
-Planned Git tag: `onestop-v2.1.0`.
+Git tag: `onestop-v2.1.0`.
 
 ### Added
 
@@ -66,11 +66,6 @@ Planned Git tag: `onestop-v2.1.0`.
 - Fortified species-derived filenames and output paths against authorship,
   accents, hybrid markers, unsafe characters, and excessive path lengths.
 
-### Removed
-
-- Deprecated, inactive, duplicate, backup, and `_old` scripts that are not
-  part of the OneSTOP v2.1.0 release workflow.
-- Generated dashboard `.err.log` and `.out.log` files from version control.
 
 ### Security
 
@@ -78,5 +73,3 @@ Planned Git tag: `onestop-v2.1.0`.
 - Read the Zenodo token from the `ZENODO_TOKEN` environment variable and stop
   with a clear error when it is not configured.
 
-[Unreleased]: https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping/compare/onestop-v2.1.0...HEAD
-[2.1.0]: https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping/compare/2c7bc8712304e46bebd1bbcf2f90771c4814f865...onestop-v2.1.0

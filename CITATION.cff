@@ -5,6 +5,7 @@ message: >-
 type: software
 title: "wiSDM OneSTOP: Alien species risk modelling and mapping"
 version: "2.1.0"
+date-released: 2026-08-11
 authors:
   - family-names: "Gonçalves"
     given-names: "João"
