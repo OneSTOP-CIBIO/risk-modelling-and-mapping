@@ -1,5 +1,5 @@
 
-# # wiSDM OneSTOP v2.1.0 (Task 5.1)  — Alien species risk modelling and mapping
+# wiSDM OneSTOP v2.1.0 (Task 5.1)  — Alien species risk modelling and mapping
 
 This repository contains the framework and R code for predicting the distribution of alien species in Europe at 1 km<sup>2</sup> (climate model) and 1 km<sup>2</sup> resolution (habitat/land cover model) as part of the TrIAS project and **later adapted to the OneSTOP Task 5.1 modelling requirements**.    
 
@@ -256,9 +256,10 @@ The core modelling structure remains recognisably wiSDM 2.0, but the surrounding
 
 ----
 
-## OneSTOP Task 5.1 Contributors
+## OneSTOP Task 5.1 contributors
 
-João Gonçalves, BIOPOLIS–CIBIO, University of Porto, Portugal
+[List of contributors](https://github.com/trias-project/risk-modelling-and-mapping/contributors)
+
 
 
 ## License

@@ -9,7 +9,7 @@ development base is commit `2c7bc8712304e46bebd1bbcf2f90771c4814f865`.
 
 No changes yet.
 
-## [2.1.0] - 2026/08/11
+## [2.1.0] - 2026-08-11
 
 Git tag: `onestop-v2.1.0`.
 
