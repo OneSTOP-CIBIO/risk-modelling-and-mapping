@@ -258,7 +258,7 @@ The core modelling structure remains recognisably wiSDM 2.0, but the surrounding
 
 ## OneSTOP Task 5.1 contributors
 
-[List of contributors](https://github.com/trias-project/risk-modelling-and-mapping/contributors)
+[List of contributors](https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping/graphs/contributors?from=09%2F05%2F2026)
 
 
 
