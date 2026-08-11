@@ -1,0 +1,62 @@
+cff-version: 1.2.0
+message: >-
+  If you use this OneSTOP adaptation of wiSDM, please cite the archived
+  software release and the upstream methodology article.
+type: software
+title: "wiSDM OneSTOP: Alien species risk modelling and mapping"
+version: "2.1.0"
+date-released: 2026-08-11
+authors:
+  - family-names: "Gonçalves"
+    given-names: "João"
+    affiliation: "BIOPOLIS–CIBIO, University of Porto, Portugal"
+repository-code: "https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping"
+url: "https://github.com/OneSTOP-CIBIO/risk-modelling-and-mapping"
+license: MIT
+abstract: >-
+  OneSTOP Task 5.1 adaptation of the TrIAS wiSDM 2.0 workflow for modelling
+  and mapping invasive alien species in Europe. The adaptation retains the
+  core climate, habitat, and combined suitability modelling framework while
+  adding user-supplied environmental inputs, custom spatial boundaries,
+  integrated cross-validation, resilient multi-species chunk execution,
+  monitoring and recovery tools, and strengthened raster and model handling.
+  It is derived from TrIAS wiSDM v2.0.0, with upstream commit
+  2c7bc8712304e46bebd1bbcf2f90771c4814f865 as the exact development base.
+keywords:
+  - invasive alien species
+  - species distribution modelling
+  - risk mapping
+  - climate change
+  - land cover
+  - reproducible research
+  - R
+preferred-citation:
+  type: article
+  title: >-
+    Reproducible WiSDM: a workflow for reproducible invasive alien species
+    risk maps under climate change scenarios using standardized open data
+  authors:
+    - family-names: "Davis"
+      given-names: "Amy-Jane S."
+    - family-names: "Groom"
+      given-names: "Quentin"
+    - family-names: "Adriaens"
+      given-names: "Tim"
+    - family-names: "Vanderhoeven"
+      given-names: "Sonia"
+    - family-names: "De Troch"
+      given-names: "Marijke"
+    - family-names: "Oldoni"
+      given-names: "Damiano"
+    - family-names: "Desmet"
+      given-names: "Peter"
+    - family-names: "Reyserhove"
+      given-names: "Lisa"
+    - family-names: "Lens"
+      given-names: "Luc"
+    - family-names: "Strubbe"
+      given-names: "Diederik"
+  doi: "10.3389/fevo.2024.1148895"
+  journal: "Frontiers in Ecology and Evolution"
+  volume: "12"
+  year: 2024
