@@ -7,7 +7,11 @@ library(tidyverse)
 
 
 ## 1. Connect to Zenodo -------------------------------------------------
-token <- "4Dqs063GQX1lFAzfPRA7NAKbGtBOpT8veuqJ46UVuNaVyEJxx3s7cgmSLDRX"
+token <- Sys.getenv("ZENODO_TOKEN")
+
+if (!nzchar(token)) {
+  stop("ZENODO_TOKEN is not configured.")
+}
 
 zen <- ZenodoManager$new(
   token  = token,

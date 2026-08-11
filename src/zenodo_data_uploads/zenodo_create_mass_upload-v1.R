@@ -9,7 +9,11 @@ library(zen4R)
 ## 1. AUTH + MANAGER ----------------------------------------------
 
 # Put your personal access token here, or rely on zenodo_pat()
-token <- "4Dqs063GQX1lFAzfPRA7NAKbGtBOpT8veuqJ46UVuNaVyEJxx3s7cgmSLDRX"
+token <- Sys.getenv("ZENODO_TOKEN")
+
+if (!nzchar(token)) {
+  stop("ZENODO_TOKEN is not configured.")
+}
 
 zen <- ZenodoManager$new(
   token  = token,
